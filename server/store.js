@@ -1,7 +1,7 @@
 import { randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
 import { DEFAULT_RULES } from './matching.js';
 
-export const store = { users: new Map(), profiles: new Map(), preferences: new Map(), consents: new Map(), verifications: new Map(), funnelEvents: [], matches: new Map(), chats: new Map(), chatMetrics: new Map(), payments: new Map(), contracts: new Map(), checkins: new Map(), agreements: new Map(), tickets: new Map(), feedback: new Map(), patternAggregates: new Map(), rules: DEFAULT_RULES.map((rule) => ({ ...rule })), notifications: [] };
+export const store = { users: new Map(), profiles: new Map(), profileCompletedAt: new Map(), preferences: new Map(), consents: new Map(), verifications: new Map(), funnelEvents: [], matches: new Map(), chats: new Map(), chatMetrics: new Map(), presence: new Map(), payments: new Map(), contracts: new Map(), checkins: new Map(), agreements: new Map(), tickets: new Map(), feedback: new Map(), patternAggregates: new Map(), rules: DEFAULT_RULES.map((rule) => ({ ...rule })), notifications: [] };
 const now = () => new Date().toISOString();
 const tenantOne = { id: '00000000-0000-4000-8000-000000000001', accountId: 'tenant1', pseudonym: '세입자 1', age: 28, gender: 'female', role: 'tenant', createdAt: now() };
 const tenantTwo = { id: '00000000-0000-4000-8000-000000000002', accountId: 'tenant2', pseudonym: '세입자 2', age: 31, gender: 'female', role: 'tenant', createdAt: now() };

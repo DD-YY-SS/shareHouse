@@ -1,6 +1,6 @@
 export { default as React, useEffect, useRef, useState } from 'react';
 export { io } from 'socket.io-client';
-export { ArrowRight, BadgeCheck, BarChart3, Check, ChevronLeft, Clock3, CreditCard, FileCheck2, Home, LockKeyhole, LogOut, MessageCircle, Send, ShieldCheck, Sparkles, UserRound, UsersRound } from 'lucide-react';
+export { ArrowRight, BadgeCheck, BarChart3, Camera, HeartHandshake, Check, ChevronLeft, Clock3, CreditCard, FileCheck2, Home, LockKeyhole, LogOut, MessageCircle, Send, ShieldCheck, Sparkles, UserRound, UsersRound } from 'lucide-react';
 
 export const API = import.meta.env.VITE_API_URL || 'http://localhost:4000';
 export const accounts = [['Tenant 1','tenant1'],['Tenant 2','tenant2'],['Operator','operatorA']];

@@ -12,6 +12,12 @@ services:
         value: 20
       - key: NODE_ENV
         value: production
+      - key: MOCK_MODE
+        value: "false"
+      - key: PERSISTENCE_READY
+        value: "false"
+      - key: ENABLE_CRON
+        value: "false"
       - key: CLIENT_ORIGIN
         sync: false
       - key: JWT_SECRET

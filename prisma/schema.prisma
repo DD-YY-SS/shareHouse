@@ -25,6 +25,11 @@ enum Gender {
   PREFER_NOT_TO_SAY
 }
 
+enum AccountRole {
+  TENANT
+  OPERATOR
+}
+
 enum MatchStatus {
   REQUESTED
   ACCEPTED
@@ -77,8 +82,16 @@ enum TicketSeverity {
 }
 
 enum CareCheckpoint {
+  DAY_15
   DAY_30
   DAY_90
+}
+
+enum ConditionType {
+  SCRATCH
+  STAIN
+  DAMAGE
+  OTHER
 }
 
 enum ExpenseStatus {
@@ -108,6 +121,7 @@ model Operator {
   contracts    Contract[]
   funnelEvents FunnelEvent[]
   tickets      MediationTicket[]
+  account      Account?
 
   @@index([deletedAt])
 }
@@ -138,8 +152,53 @@ model Tenant {
   expenseShares    ExpenseShare[]
   assignedChores   Chore[]
   feedbackLabels   FeedbackLabel[]
+  account          Account?
+  conditionLogs    RoomConditionLog[]
+  careCheckins     CareCheckin[]
 
   @@index([deletedAt])
+}
+
+// Authentication is deliberately separated from tenant/operator profiles.
+// This lets us rotate credentials and sessions without duplicating personal
+// profile data, and makes a future SSO provider integration straightforward.
+model Account {
+  id               String      @id @default(uuid()) @db.Uuid
+  loginId          String      @unique @db.VarChar(80)
+  passwordHash     String      @db.VarChar(255)
+  role             AccountRole
+  tenantId         String?     @unique @db.Uuid
+  operatorId       String?     @unique @db.Uuid
+  passwordChangedAt DateTime   @default(now())
+  lastLoginAt      DateTime?
+  disabledAt       DateTime?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+  deletedAt        DateTime?
+
+  tenant          Tenant?      @relation(fields: [tenantId], references: [id])
+  operator        Operator?    @relation(fields: [operatorId], references: [id])
+  refreshSessions RefreshSession[]
+
+  @@index([role, disabledAt])
+  @@index([deletedAt])
+}
+
+// Only a SHA-256 digest of refresh tokens is persisted. A database leak must
+// not provide a usable long-lived session token.
+model RefreshSession {
+  id         String    @id @default(uuid()) @db.Uuid
+  accountId  String    @db.Uuid
+  tokenDigest String   @unique @db.Char(64)
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId, expiresAt])
+  @@index([expiresAt, revokedAt])
 }
 
 model Room {
@@ -159,6 +218,7 @@ model Room {
   tickets      MediationTicket[]
   expenses     Expense[]
   chores       Chore[]
+  conditionLogs RoomConditionLog[]
 
   @@unique([operatorId, externalRoomId])
   @@index([operatorId, status])
@@ -240,12 +300,56 @@ model Match {
   contract    Contract?
   chatSession ChatSession?
   agreement   DigitalAgreement?
+  careCheckins CareCheckin[]
 
   @@unique([tenantAId, tenantBId, roomId])
   @@index([roomId, status])
   @@index([tenantAId, status])
   @@index([tenantBId, status])
   @@index([status, compatibilityScore])
+  @@index([deletedAt])
+}
+
+model RoomConditionLog {
+  id          String        @id @default(uuid()) @db.Uuid
+  roomId      String        @db.Uuid
+  reporterId  String        @db.Uuid
+  type        ConditionType
+  description String?
+  imageUrl    String        @db.VarChar(2048)
+  capturedAt  DateTime
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  deletedAt   DateTime?
+
+  room     Room   @relation(fields: [roomId], references: [id])
+  reporter Tenant @relation(fields: [reporterId], references: [id])
+
+  @@index([roomId, capturedAt])
+  @@index([reporterId, createdAt])
+  @@index([deletedAt])
+}
+
+model CareCheckin {
+  id           String         @id @default(uuid()) @db.Uuid
+  matchId      String         @db.Uuid
+  tenantId     String         @db.Uuid
+  checkpoint   CareCheckpoint
+  satisfaction Int?           @db.SmallInt
+  conflict     Boolean?
+  label        String?        @db.VarChar(40)
+  sentAt       DateTime?
+  respondedAt  DateTime?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+  deletedAt    DateTime?
+
+  match  Match  @relation(fields: [matchId], references: [id])
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([matchId, tenantId, checkpoint])
+  @@index([tenantId, respondedAt])
+  @@index([checkpoint, respondedAt])
   @@index([deletedAt])
 }
 
@@ -258,6 +362,7 @@ model Payment {
   transactionId     String?       @unique @db.VarChar(160)
   providerKeyDigest String?       @db.Char(64)
   idempotencyKey    String        @unique @db.VarChar(100)
+  paidTenantIds     String[]      @default([])
   paidAt            DateTime?
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt

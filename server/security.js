@@ -14,6 +14,8 @@ export const authLimiter = rateLimit({
   limit: 10,
   standardHeaders: 'draft-8',
   legacyHeaders: false,
+  // Mock mode is local/demo-only; production keeps the 10-attempt limiter.
+  skip: (req) => process.env.MOCK_MODE === 'true' || (process.env.NODE_ENV !== 'production' && ['tenant1', 'tenant2'].includes(req.body?.accountId)),
   message: { error: 'AUTH_RATE_LIMITED' },
 });
 

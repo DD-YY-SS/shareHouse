@@ -12,7 +12,8 @@
     "db:format": "prisma format --schema prisma/schema.prisma",
     "db:validate": "prisma validate --schema prisma/schema.prisma",
     "db:generate": "prisma generate --schema prisma/schema.prisma",
-    "db:push": "prisma db push --schema prisma/schema.prisma"
+    "db:push": "prisma db push --schema prisma/schema.prisma",
+    "db:seed": "node server/scripts/seed-production.js"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",

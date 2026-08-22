@@ -164,6 +164,9 @@ Redis가 실행되지 않아도 서버는 Mock 채팅 저장소로 동작하지�
 
 Prisma 명령은 `cmd.exe`에서 실행합니다.
 
+Get-Process node | Stop-Process -Force
+npx prisma generate --schema prisma/schema.prisma
+
 ```cmd
 npx prisma format --schema prisma/schema.prisma
 npx prisma validate --schema prisma/schema.prisma
@@ -283,3 +286,40 @@ npm run build
 ```
 
 현재 외부 본인인증, PG 결제, PostgreSQL repository는 Mock/API 계약 형태입니다. 실제 출시 전에는 외부 연동 자격증명, 개인정보 보유기간, 접근권한, 결제 환불 정책, 로그 마스킹을 별도로 검토해야 합니다.
+# CheckMate MVP 진행 현황
+
+현재 로컬 MVP는 PostgreSQL·Prisma·Redis 기반으로 구성되어 있습니다.
+
+## 구현된 기능
+
+- PostgreSQL 계정/사용자 프로필 및 행동 설문 저장
+- Prisma 기반 매칭·결제·채팅 세션 저장
+- 양쪽 사용자 채팅 요청 및 상호 수락 흐름
+- Redis/Socket.IO 실시간 30분 익명 채팅
+- 양쪽 결제 완료 전 입주 라운지 접근 제한
+- 30일 안심 케어 화면과 룸메이트 상태 표시
+- 채팅 센터(받은 요청/활성 채팅방)
+- 마이페이지 사용자 정보 수정
+- 듀얼 채팅 데모(`?demo=dual`)
+- Prisma Repository 및 CareCheckin 스케줄러 기반
+
+## 로컬 실행
+
+```powershell
+docker compose up -d postgres redis
+npm install
+npx prisma db push --schema prisma/schema.prisma
+$env:SEED_PASSWORD="1234"
+npm run db:seed
+npm run server
+```
+
+별도 터미널에서 프론트를 실행합니다.
+
+```powershell
+npm run dev
+```
+
+기본 계정은 `tenant1`, `tenant2`, `operator1`이며 로컬 시드 시 지정한 `SEED_PASSWORD`를 사용합니다.
+
+주의: `.env`는 커밋하지 말고 배포 환경의 환경 변수로 관리하세요. 운영 전 `MOCK_MODE=false`, 강한 JWT/DB 비밀번호, 결제·인증 공급자 설정을 점검해야 합니다.
