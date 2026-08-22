@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: checkmate-api
+    runtime: node
+    plan: starter
+    buildCommand: npm ci
+    startCommand: npm run server
+    autoDeploy: false
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: NODE_ENV
+        value: production
+      - key: CLIENT_ORIGIN
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: REFRESH_TOKEN_SECRET
+        sync: false
+      - key: VERIFICATION_PEPPER
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+
+databases:
+  - name: checkmate-postgres
+    plan: starter
+    databaseName: checkmate
+    user: checkmate

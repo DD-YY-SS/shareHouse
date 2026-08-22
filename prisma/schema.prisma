@@ -1,0 +1,563 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RoomStatus {
+  VACANT
+  MATCHING
+  OCCUPIED
+}
+
+enum VerificationType {
+  IDENTITY
+  AFFILIATION
+}
+
+enum Gender {
+  FEMALE
+  MALE
+  NON_BINARY
+  PREFER_NOT_TO_SAY
+}
+
+enum MatchStatus {
+  REQUESTED
+  ACCEPTED
+  REJECTED
+  CONFIRMED
+}
+
+enum PaymentStatus {
+  READY
+  PAID
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum ContractStatus {
+  RESERVED
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum ChatSessionStatus {
+  ACTIVE
+  READ_ONLY
+  EXPIRED
+}
+
+enum AgreementStatus {
+  DRAFT
+  PARTIALLY_SIGNED
+  SIGNED
+  VOID
+}
+
+enum TicketStatus {
+  OPEN
+  IN_REVIEW
+  REPLACEMENT_PENDING
+  REPLACEMENT_APPROVED
+  RESOLVED
+  CLOSED
+}
+
+enum TicketSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum CareCheckpoint {
+  DAY_30
+  DAY_90
+}
+
+enum ExpenseStatus {
+  OPEN
+  PARTIALLY_SETTLED
+  SETTLED
+}
+
+enum GuaranteeStatus {
+  NONE
+  ELIGIBLE
+  IN_REVIEW
+  APPROVED
+  COMPLETED
+}
+
+model Operator {
+  id           String    @id @default(uuid()) @db.Uuid
+  name         String
+  slug         String    @unique @db.VarChar(80)
+  contactEmail String?   @db.VarChar(320)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+
+  rooms        Room[]
+  contracts    Contract[]
+  funnelEvents FunnelEvent[]
+  tickets      MediationTicket[]
+
+  @@index([deletedAt])
+}
+
+model Tenant {
+  id        String    @id @default(uuid()) @db.Uuid
+  loginId   String    @unique @db.VarChar(80)
+  pseudonym String    @db.VarChar(80)
+  email     String?   @db.VarChar(320)
+  age       Int?      @db.SmallInt
+  gender    Gender?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  consents         Consent[]
+  verifications    Verification[]
+  behaviorProfile  BehaviorProfile?
+  matchesAsA       Match[]              @relation("MatchTenantA")
+  matchesAsB       Match[]              @relation("MatchTenantB")
+  contractsAsA     Contract[]           @relation("ContractTenantA")
+  contractsAsB     Contract[]           @relation("ContractTenantB")
+  agreementsSigned AgreementSignature[]
+  chatMessages     ChatMessage[]
+  chatMetrics      ChatBehaviorMetric[]
+  reportedTickets  MediationTicket[]
+  createdExpenses  Expense[]
+  expenseShares    ExpenseShare[]
+  assignedChores   Chore[]
+  feedbackLabels   FeedbackLabel[]
+
+  @@index([deletedAt])
+}
+
+model Room {
+  id             String     @id @default(uuid()) @db.Uuid
+  operatorId     String     @db.Uuid
+  externalRoomId String     @db.VarChar(80)
+  name           String?    @db.VarChar(120)
+  status         RoomStatus @default(VACANT)
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  deletedAt      DateTime?
+
+  operator     Operator          @relation(fields: [operatorId], references: [id])
+  matches      Match[]
+  contracts    Contract[]
+  funnelEvents FunnelEvent[]
+  tickets      MediationTicket[]
+  expenses     Expense[]
+  chores       Chore[]
+
+  @@unique([operatorId, externalRoomId])
+  @@index([operatorId, status])
+  @@index([deletedAt])
+}
+
+model Consent {
+  id             String    @id @default(uuid()) @db.Uuid
+  tenantId       String    @db.Uuid
+  policyVersion  String    @db.VarChar(30)
+  agreedAt       DateTime
+  evidenceDigest String    @db.Char(64)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId, agreedAt])
+  @@index([deletedAt])
+}
+
+model Verification {
+  id           String           @id @default(uuid()) @db.Uuid
+  tenantId     String           @db.Uuid
+  type         VerificationType
+  provider     String           @db.VarChar(80)
+  passed       Boolean
+  expiresAt    DateTime?
+  verifiedAt   DateTime?
+  // 원본 주민번호·문서·민감내용은 저장하지 않고 결과 검증용 digest만 보관합니다.
+  resultDigest String?          @db.Char(64)
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  deletedAt    DateTime?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, type, provider])
+  @@index([tenantId, passed, expiresAt])
+  @@index([deletedAt])
+}
+
+model BehaviorProfile {
+  id          String    @id @default(uuid()) @db.Uuid
+  tenantId    String    @unique @db.Uuid
+  version     Int       @default(1)
+  answers     Json      @db.JsonB
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@index([completedAt])
+  @@index([deletedAt])
+}
+
+model Match {
+  id                 String      @id @default(uuid()) @db.Uuid
+  tenantAId          String      @db.Uuid
+  tenantBId          String      @db.Uuid
+  roomId             String      @db.Uuid
+  compatibilityScore Int         @db.SmallInt
+  scoreBreakdown     Json        @db.JsonB
+  status             MatchStatus @default(REQUESTED)
+  requestedAt        DateTime    @default(now())
+  acceptedAt         DateTime?
+  confirmedAt        DateTime?
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+  deletedAt          DateTime?
+
+  tenantA     Tenant            @relation("MatchTenantA", fields: [tenantAId], references: [id])
+  tenantB     Tenant            @relation("MatchTenantB", fields: [tenantBId], references: [id])
+  room        Room              @relation(fields: [roomId], references: [id])
+  payment     Payment?
+  contract    Contract?
+  chatSession ChatSession?
+  agreement   DigitalAgreement?
+
+  @@unique([tenantAId, tenantBId, roomId])
+  @@index([roomId, status])
+  @@index([tenantAId, status])
+  @@index([tenantBId, status])
+  @@index([status, compatibilityScore])
+  @@index([deletedAt])
+}
+
+model Payment {
+  id                String        @id @default(uuid()) @db.Uuid
+  matchId           String        @unique @db.Uuid
+  amountKrw         Int
+  status            PaymentStatus @default(READY)
+  provider          String?       @db.VarChar(40)
+  transactionId     String?       @unique @db.VarChar(160)
+  providerKeyDigest String?       @db.Char(64)
+  idempotencyKey    String        @unique @db.VarChar(100)
+  paidAt            DateTime?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  deletedAt         DateTime?
+
+  match Match @relation(fields: [matchId], references: [id])
+
+  @@index([status, createdAt])
+  @@index([deletedAt])
+}
+
+model Contract {
+  id          String         @id @default(uuid()) @db.Uuid
+  matchId     String         @unique @db.Uuid
+  operatorId  String         @db.Uuid
+  roomId      String         @db.Uuid
+  tenantAId   String         @db.Uuid
+  tenantBId   String         @db.Uuid
+  moveInDate  DateTime       @db.Date
+  status      ContractStatus @default(RESERVED)
+  confirmedAt DateTime?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  deletedAt   DateTime?
+
+  match          Match           @relation(fields: [matchId], references: [id])
+  operator       Operator        @relation(fields: [operatorId], references: [id])
+  room           Room            @relation(fields: [roomId], references: [id])
+  tenantA        Tenant          @relation("ContractTenantA", fields: [tenantAId], references: [id])
+  tenantB        Tenant          @relation("ContractTenantB", fields: [tenantBId], references: [id])
+  careLogs       CareLog[]
+  feedbackLabels FeedbackLabel[]
+
+  @@index([operatorId, status, moveInDate])
+  @@index([roomId, status])
+  @@index([moveInDate, status])
+  @@index([deletedAt])
+}
+
+model CareLog {
+  id           String         @id @default(uuid()) @db.Uuid
+  contractId   String         @db.Uuid
+  checkpoint   CareCheckpoint
+  dueAt        DateTime
+  sentAt       DateTime?
+  respondedAt  DateTime?
+  conflict     Boolean?
+  satisfaction Int?           @db.SmallInt
+  outcomeLabel String?        @db.VarChar(40)
+  notes        String?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+  deletedAt    DateTime?
+
+  contract Contract @relation(fields: [contractId], references: [id])
+
+  @@unique([contractId, checkpoint])
+  @@index([dueAt, respondedAt])
+  @@index([deletedAt])
+}
+
+model FeedbackLabel {
+  id                 String         @id @default(uuid()) @db.Uuid
+  contractId         String         @db.Uuid
+  tenantId           String         @db.Uuid
+  checkpoint         CareCheckpoint
+  satisfaction       Int            @db.SmallInt
+  conflict           Boolean        @default(false)
+  earlyExit          Boolean        @default(false)
+  label              String         @db.VarChar(40)
+  conflictCategories String[]       @default([])
+  behaviorSnapshot   Json?          @db.JsonB
+  chatFeatures       Json?          @db.JsonB
+  labelVersion       Int            @default(1)
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+  deletedAt          DateTime?
+
+  contract Contract @relation(fields: [contractId], references: [id])
+  tenant   Tenant   @relation(fields: [tenantId], references: [id])
+
+  @@index([contractId, checkpoint])
+  @@index([tenantId, createdAt])
+  @@index([deletedAt])
+}
+
+model OutcomePatternAggregate {
+  id              String    @id @default(uuid()) @db.Uuid
+  patternKey      String    @unique @db.Char(64)
+  featureSummary  Json      @db.JsonB
+  categoryCounts  Json      @db.JsonB
+  totalSamples    Int       @default(0)
+  conflictSamples Int       @default(0)
+  stableSamples   Int       @default(0)
+  satisfactionSum Int       @default(0)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime?
+
+  @@index([conflictSamples, totalSamples])
+  @@index([deletedAt])
+}
+
+model DigitalAgreement {
+  id        String          @id @default(uuid()) @db.Uuid
+  matchId   String          @unique @db.Uuid
+  rules     Json            @db.JsonB
+  status    AgreementStatus @default(DRAFT)
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+  deletedAt DateTime?
+
+  match      Match                @relation(fields: [matchId], references: [id])
+  signatures AgreementSignature[]
+
+  @@index([status, updatedAt])
+  @@index([deletedAt])
+}
+
+model AgreementSignature {
+  id              String    @id @default(uuid()) @db.Uuid
+  agreementId     String    @db.Uuid
+  tenantId        String    @db.Uuid
+  signedAt        DateTime?
+  signatureDigest String?   @db.Char(64)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime?
+
+  agreement DigitalAgreement @relation(fields: [agreementId], references: [id])
+  tenant    Tenant           @relation(fields: [tenantId], references: [id])
+
+  @@unique([agreementId, tenantId])
+  @@index([tenantId, signedAt])
+  @@index([deletedAt])
+}
+
+model ChatSession {
+  id        String            @id @default(uuid()) @db.Uuid
+  matchId   String            @unique @db.Uuid
+  status    ChatSessionStatus @default(ACTIVE)
+  expiresAt DateTime
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+  deletedAt DateTime?
+
+  match           Match                @relation(fields: [matchId], references: [id])
+  messages        ChatMessage[]
+  behaviorMetrics ChatBehaviorMetric[]
+
+  @@index([status, expiresAt])
+  @@index([deletedAt])
+}
+
+model ChatBehaviorMetric {
+  id                       String    @id @default(uuid()) @db.Uuid
+  chatSessionId            String    @db.Uuid
+  tenantId                 String    @db.Uuid
+  firstMessageAt           DateTime?
+  firstResponseLatencyMs   Int?
+  averageResponseLatencyMs Int?
+  sentMessageCount         Int       @default(0)
+  receivedMessageCount     Int       @default(0)
+  activeSeconds            Int       @default(0)
+  acceptanceLatencyMs      Int?
+  proactivityScore         Int?      @db.SmallInt
+  createdAt                DateTime  @default(now())
+  updatedAt                DateTime  @updatedAt
+  deletedAt                DateTime?
+
+  chatSession ChatSession @relation(fields: [chatSessionId], references: [id])
+  tenant      Tenant      @relation(fields: [tenantId], references: [id])
+
+  @@unique([chatSessionId, tenantId])
+  @@index([tenantId, proactivityScore])
+  @@index([chatSessionId, updatedAt])
+  @@index([deletedAt])
+}
+
+model ChatMessage {
+  id        String    @id @default(uuid()) @db.Uuid
+  sessionId String    @db.Uuid
+  senderId  String    @db.Uuid
+  body      String
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  session ChatSession @relation(fields: [sessionId], references: [id])
+  sender  Tenant      @relation(fields: [senderId], references: [id])
+
+  @@index([sessionId, createdAt])
+  @@index([senderId, createdAt])
+  @@index([deletedAt])
+}
+
+model MediationTicket {
+  id                String          @id @default(uuid()) @db.Uuid
+  operatorId        String          @db.Uuid
+  roomId            String          @db.Uuid
+  reporterId        String          @db.Uuid
+  category          String          @db.VarChar(60)
+  description       String
+  severity          TicketSeverity  @default(MEDIUM)
+  status            TicketStatus    @default(OPEN)
+  matchId           String?         @db.Uuid
+  agreementId       String?         @db.Uuid
+  sequence          Int             @default(1)
+  guaranteeStatus   GuaranteeStatus @default(NONE)
+  webhookNotifiedAt DateTime?
+  resolvedAt        DateTime?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  deletedAt         DateTime?
+
+  operator Operator @relation(fields: [operatorId], references: [id])
+  room     Room     @relation(fields: [roomId], references: [id])
+  reporter Tenant   @relation(fields: [reporterId], references: [id])
+
+  @@index([operatorId, status, severity])
+  @@index([roomId, status])
+  @@index([createdAt])
+  @@index([deletedAt])
+}
+
+model Expense {
+  id          String        @id @default(uuid()) @db.Uuid
+  roomId      String        @db.Uuid
+  createdById String        @db.Uuid
+  title       String        @db.VarChar(120)
+  amountKrw   Int
+  receiptUrl  String?
+  status      ExpenseStatus @default(OPEN)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  deletedAt   DateTime?
+
+  room      Room           @relation(fields: [roomId], references: [id])
+  createdBy Tenant         @relation(fields: [createdById], references: [id])
+  shares    ExpenseShare[]
+
+  @@index([roomId, status, createdAt])
+  @@index([deletedAt])
+}
+
+model ExpenseShare {
+  id        String    @id @default(uuid()) @db.Uuid
+  expenseId String    @db.Uuid
+  tenantId  String    @db.Uuid
+  amountKrw Int
+  paidAt    DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  expense Expense @relation(fields: [expenseId], references: [id])
+  tenant  Tenant  @relation(fields: [tenantId], references: [id])
+
+  @@unique([expenseId, tenantId])
+  @@index([tenantId, paidAt])
+  @@index([deletedAt])
+}
+
+model Chore {
+  id          String    @id @default(uuid()) @db.Uuid
+  roomId      String    @db.Uuid
+  assigneeId  String    @db.Uuid
+  category    String    @db.VarChar(80)
+  dueDate     DateTime  @db.Date
+  completedAt DateTime?
+  proofUrl    String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  room     Room   @relation(fields: [roomId], references: [id])
+  assignee Tenant @relation(fields: [assigneeId], references: [id])
+
+  @@unique([roomId, category, dueDate])
+  @@index([assigneeId, dueDate, completedAt])
+  @@index([roomId, dueDate])
+  @@index([deletedAt])
+}
+
+model FunnelEvent {
+  id         String    @id @default(uuid()) @db.Uuid
+  operatorId String    @db.Uuid
+  roomId     String    @db.Uuid
+  tenantId   String?   @db.Uuid
+  funnelId   String    @db.Uuid
+  step       String    @db.VarChar(40)
+  metadata   Json?     @db.JsonB
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  deletedAt  DateTime?
+
+  operator Operator @relation(fields: [operatorId], references: [id])
+  room     Room     @relation(fields: [roomId], references: [id])
+
+  @@index([operatorId, roomId, step, createdAt])
+  @@index([tenantId, funnelId])
+  @@index([deletedAt])
+}

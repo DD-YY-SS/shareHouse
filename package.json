@@ -1,0 +1,43 @@
+{
+  "name": "safeshare-mvp",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "server": "node server/index.js",
+    "server:dev": "node --watch server/index.js",
+    "db:format": "prisma format --schema prisma/schema.prisma",
+    "db:validate": "prisma validate --schema prisma/schema.prisma",
+    "db:generate": "prisma generate --schema prisma/schema.prisma",
+    "db:push": "prisma db push --schema prisma/schema.prisma"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "vite": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "socket.io-client": "latest",
+    "lucide-react": "latest",
+    "cors": "latest",
+    "dotenv": "latest",
+    "express": "latest",
+    "jsonwebtoken": "latest",
+    "node-cron": "latest",
+    "pg": "latest",
+    "@prisma/client": "^6.19.0",
+    "socket.io": "latest",
+    "redis": "latest",
+    "@socket.io/redis-adapter": "latest"
+    ,"cookie-parser": "latest"
+    ,"express-rate-limit": "latest"
+    ,"helmet": "latest"
+    ,"morgan": "latest"
+    ,"zod": "latest"
+  },
+  "devDependencies": {
+    "prisma": "^6.19.0"
+  }
+}

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 145 145" role="img" aria-labelledby="title desc">
+  <title id="title">CheckMate 로고</title>
+  <desc id="desc">집 안에서 두 사람이 연결된 모습을 표현한 CheckMate 심볼</desc>
+  <path d="M20 49 72 10l22 16V18h18v17l15 14v38c0 17-8 29-22 38" fill="none" stroke="#2d3f7c" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M30 53v36c0 10 5 17 14 20" fill="none" stroke="#2d3f7c" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="53" cy="55" r="8" fill="none" stroke="#2d3f7c" stroke-width="5"/>
+  <path d="M38 101V88c0-10 7-17 16-17s16 7 16 17v8" fill="none" stroke="#2d3f7c" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="102" cy="55" r="8" fill="none" stroke="#6bc0ac" stroke-width="5"/>
+  <path d="M87 101V88c0-10 7-17 16-17s16 7 16 17v11" fill="none" stroke="#6bc0ac" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="65" cy="91" r="5" fill="#f8fafb" stroke="#2d3f7c" stroke-width="4"/>
+  <path d="M70 91h18" fill="none" stroke="#6bc0ac" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="89" cy="91" r="5" fill="#f8fafb" stroke="#6bc0ac" stroke-width="4"/>
+  <path d="M72 132c-4-2-28-15-28-34 0-8 6-13 13-13 7 0 12 5 15 10 3-5 8-10 15-10 7 0 13 5 13 13 0 19-24 32-28 34Z" fill="none" stroke="#6bc0ac" stroke-width="5" stroke-linejoin="round"/>
+</svg>
