@@ -39,3 +39,108 @@
 .bottom-nav button:first-child{font-size:0}.bottom-nav button:first-child::after{content:'홈';font:12px 'Noto Sans KR'}
 .care-page{height:calc(100dvh - 134px);min-height:0;overflow-y:auto;scrollbar-width:none;-ms-overflow-style:none;padding-bottom:110px}
 .care-page::-webkit-scrollbar{display:none;width:0;height:0}
+/* Twitch Core UI-inspired CheckMate theme: flat, dense, ultraviolet-led. */
+:root{font-family:Inter,'Noto Sans KR',sans-serif;color:#0e0e10;background:#f7f7f8;--navy:#0e0e10;--blue:#5c16c5;--green:#347860;--line:#dedee3;--muted:#747484;--purple:#9146ff;--purple-dark:#5c16c5;--canvas:#f7f7f8;--surface:#fff;--surface-alt:#efeff1}
+body{background:#f7f7f8;color:#0e0e10}
+.app-shell,.dashboard-shell{background:#f7f7f8;box-shadow:none;border-radius:0}
+.topbar{background:#fff;border-bottom:1px solid #dedee3}
+.page-pad{padding:24px 20px 100px}
+.primary-button{background:#9146ff;box-shadow:none;border-radius:9999px;font-family:Inter,'Noto Sans KR',sans-serif;font-size:14px;min-height:40px}
+.primary-button:hover{background:#5c16c5}.primary-button:active{background:#451093}
+.secondary-button{background:#efeff1;border:0;border-radius:9999px;font-family:Inter,'Noto Sans KR',sans-serif;font-size:14px}
+.bottom-nav{background:#fff;border-top:1px solid #dedee3;box-shadow:none}
+.bottom-nav button.active{color:#5c16c5}
+.frequency-list button,.survey-block,.profile-card,.agreement-card,.care-status-card,.care-action-card,.inbox-card,.inbox-empty,.lounge-action,.lounge-welcome-card{box-shadow:none;border-color:#dedee3}
+.frequency-list button{border-radius:8px;background:#fff}.frequency-list button.selected{border-color:#9146ff;background:#f3ebff}.selected .radio{border-color:#9146ff}
+.lounge-care-card{background:#330c6e;box-shadow:none;border-radius:8px}.lounge-action{border-radius:8px;background:#fff}.lounge-action.primary{background:#f3ebff;border-color:#9146ff}
+.chat-policy,.chat-benefit-warning,.preauth-note{border-radius:4px;box-shadow:none}
+.chat-input{box-shadow:none;border-top:1px solid #dedee3}
+.chat-input button{background:#9146ff;box-shadow:none}
+.inbox-card{border-radius:8px}.inbox-action{border-radius:9999px}
+.section-kicker{color:#5c16c5}.care-page-badge{color:#5c16c5;background:#efeff1}
+.care-hero,.care-support-card,.care-notice{box-shadow:none}
+.care-overlay,.care-modal,.pulse-card{box-shadow:none}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:0.01ms!important;transition-duration:0.01ms!important}}
+.care-page{padding:16px 16px 92px!important}
+.care-page .care-header{margin-bottom:10px}
+.care-page .care-header h2{font-size:22px;line-height:1.25;margin:8px 0 5px}
+.care-page .care-status-card{margin:12px 0;padding:12px;min-height:0}
+.care-page .care-status-icon{width:34px;height:34px}
+.care-page .care-timeline{margin:12px 0}
+.care-page .care-timeline-item{padding-bottom:14px;gap:8px}
+.care-page .care-timeline-item strong{font-size:12px;margin:2px 0}
+.care-page .care-timeline-item p{font-size:10px}
+.care-page .care-support-card{margin:0 0 10px;padding:10px}
+.care-page .care-action-grid{gap:7px;margin-top:8px}
+.care-page .care-action-card{min-height:112px;padding:11px}
+.care-page .care-action-icon{width:30px;height:30px}
+body:has(.match-score) .page-pad{padding:16px 16px 84px}
+body:has(.match-score) .back-button{margin-bottom:18px}
+body:has(.match-score) .inner-page h2{font-size:22px;line-height:1.25;margin:8px 0 5px}
+body:has(.match-score) .match-score{margin:14px 0 9px;padding:12px;border-radius:8px;gap:11px}
+body:has(.match-score) .score-ring{width:68px;height:68px;border-width:5px}
+body:has(.match-score) .score-ring strong{font-size:22px}
+body:has(.match-score) .profile-card{padding:11px}
+body:has(.match-score) .reason-list{margin:7px 0}
+body:has(.match-score) .reason-list>div{padding:7px 2px}
+body:has(.match-score) .match-accepted-state{padding:12px;margin-top:8px}
+
+/* 앱 프레임은 항상 동일한 높이를 유지하고, 콘텐츠만 내부에서 스크롤합니다. */
+html,body,#root{min-height:100%;}
+body{overflow:hidden;}
+.app-shell,.dashboard-shell{height:100dvh;min-height:0;max-height:100dvh;display:flex;flex-direction:column;overflow:hidden;}
+.app-shell main{height:calc(100dvh - 134px);min-height:0;max-height:none;flex:1 1 auto;overflow-y:auto;overflow-x:hidden;scrollbar-width:none;-ms-overflow-style:none;}
+.app-shell main::-webkit-scrollbar{display:none;width:0;height:0;}
+.topbar{flex:0 0 66px;}
+.bottom-nav{position:fixed;bottom:0;height:68px;}
+@media(min-width:700px){
+  .app-shell,.dashboard-shell{height:calc(100dvh - 48px);max-height:calc(100dvh - 48px);}
+  .app-shell main{height:calc(100% - 134px);}
+  .bottom-nav{position:absolute;bottom:0;}
+}
+.lounge-home .lounge-welcome-card,.lounge-home .lounge-care-card,.lounge-home .lounge-action,.lounge-home .lounge-widget,.lounge-home .house-game-card,.lounge-home .calendar-panel,.lounge-home .lounge-quick-status,.lounge-home .lounge-shopping,.calendar-page .calendar-panel,.profile-card,.consent-card,.match-score,.chat-preview{border:0!important;border-color:transparent!important;border-radius:24px!important;box-shadow:0 4px 24px rgba(0,0,0,.04)!important}
+.lounge-home .lounge-welcome-card,.lounge-home .lounge-widget,.lounge-home .lounge-quick-status,.lounge-home .calendar-panel,.calendar-page .calendar-panel{padding:20px!important}
+.lounge-home .lounge-action,.lounge-home .lounge-shopping{padding:20px!important}
+.lounge-home .lounge-widget small,.lounge-home .calendar-panel-head small,.calendar-page .calendar-panel-head small{color:#64748b}
+.lounge-home p,.lounge-home span,.calendar-page p{color:#64748b}
+.lounge-home .lounge-action:hover,.lounge-home .lounge-widget:hover,.lounge-home .calendar-panel:hover{box-shadow:0 6px 28px rgba(0,0,0,.06)!important;transform:translateY(-1px)}
+.lounge-home .lounge-action,.lounge-home .lounge-widget,.lounge-home .calendar-panel{transition:box-shadow .2s ease,transform .2s ease}
+.calendar-month-grid button,.calendar-days button{border:0!important;border-radius:16px!important}
+.calendar-form input{border:1px solid #f1f5f9!important;border-radius:14px!important;background:#f8fafc}
+.primary-button{border-radius:16px!important}
+.lounge-home{background:#fff!important}.lounge-home .lounge-care-card,.lounge-home .lounge-welcome-card,.lounge-home .lounge-quick-status,.lounge-home .lounge-widget,.lounge-home .lounge-shopping,.lounge-home .calendar-panel{background:#fff!important}.lounge-home .lounge-care-card{color:#334155}.lounge-home .lounge-welcome-icon{display:none}.lounge-home .lounge-welcome-card{padding-left:0!important}.lounge-home .section-kicker{display:none}.lounge-home .lounge-greeting h1{color:#1e293b}.lounge-home .lounge-greeting h1 em{color:#475569}
+.match-accepted-state{display:flex!important;flex-direction:row!important;align-items:center!important;gap:12px!important;margin-top:20px!important;padding:16px 14px!important;border:0!important;border-radius:18px!important;background:#f8fafc!important;color:#0f172a!important;text-align:left!important}.match-accepted-icon{width:38px;height:38px;display:grid;place-items:center;flex:none;border-radius:12px;background:#f1eaff;color:#7650cc}.match-accepted-state>div{display:grid;gap:3px}.match-accepted-state strong{font-size:14px;color:#0f172a}.match-accepted-state span{font-size:11px;color:#64748b}.tiny-note{font-size:11px!important;color:#94a3b8!important;gap:5px!important;margin-top:16px!important}.tiny-note svg{opacity:.65}
+.score-ring{position:relative;justify-content:center!important}.score-ring strong{display:flex;align-items:baseline;justify-content:center;width:100%;line-height:1}.score-ring span{display:none}
+.theme-toggle{width:34px;height:34px;border:0;border-radius:50%;display:grid;place-items:center;background:#f8fafc;color:#64748b;cursor:pointer}.dark body{background:#0f1115;color:#e2e8f0}.dark .app-shell,.dark .dashboard-shell{background:#15171c;color:#e2e8f0;box-shadow:0 0 48px rgba(0,0,0,.3)}.dark .topbar{background:#15171cee;border-color:#272b33}.dark .brand{color:#f1f5f9}.dark .theme-toggle{background:#252a33;color:#facc15}.dark .page-pad,.dark .inner-page{color:#e2e8f0}.dark .muted,.dark .lead{color:#94a3b8}.dark .lounge-home{background:#15171c!important}.dark .lounge-home .lounge-welcome-card,.dark .lounge-home .lounge-care-card,.dark .lounge-home .lounge-quick-status,.dark .lounge-home .lounge-widget,.dark .lounge-home .lounge-shopping,.dark .lounge-home .calendar-panel,.dark .calendar-page .calendar-panel,.dark .profile-card,.dark .match-score,.dark .chat-preview,.dark .consent-card{background:#1b1e24!important;color:#e2e8f0}.dark .lounge-home .lounge-greeting h1,.dark .lounge-home .lounge-widget strong,.dark .calendar-panel-head strong,.dark .calendar-selected-title strong,.dark .profile-top h3,.dark .reason-list strong{color:#f1f5f9}.dark .lounge-home p,.dark .lounge-home span,.dark .calendar-panel p,.dark .calendar-panel small,.dark .calendar-panel-head small{color:#94a3b8}.dark .calendar-days button,.dark .calendar-month-grid button{background:#252a33;color:#e2e8f0}.dark .calendar-month-grid button.outside{background:#1b1e24;color:#64748b}.dark .calendar-month-weekdays{border-color:#30343d}.dark .calendar-form input{background:#252a33;color:#f1f5f9;border-color:#30343d!important}.dark .bottom-nav{background:#15171cee;border-color:#272b33}.dark .bottom-nav button{color:#94a3b8}.dark .back-button{color:#94a3b8}.dark .tiny-note{color:#64748b!important}
+.dark{color-scheme:dark}.dark .login-shell,.dark .login-page{background:#0f1115;color:#f1f5f9}.dark .login-card,.dark .login-card-head,.dark .entry-visual,.dark .frequency-list button,.dark .matching-preferences,.dark .care-cards>div,.dark .presence-card,.dark .care-modal,.dark .care-bottom-sheet,.dark .inbox-card,.dark .my-profile-card,.dark .my-account-note,.dark .agreement-card,.dark .payment-box{background:#1b1e24!important;color:#e2e8f0;border-color:#30343d!important;box-shadow:0 2px 12px rgba(0,0,0,.2)}.dark .login-card input,.dark .matching-preferences input,.dark .matching-preferences select,.dark .profile-edit-form input,.dark .profile-edit-form select,.dark textarea,.dark select{background:#252a33!important;color:#f1f5f9!important;border-color:#3b424e!important}.dark .login-card label,.dark .login-card-head strong,.dark .entry-visual strong,.dark .frequency-list button,.dark .matching-preferences strong,.dark .care-cards strong,.dark .presence-card strong,.dark .inbox-card strong,.dark .my-profile-card strong,.dark .agreement-card strong,.dark .payment-box strong{color:#f1f5f9!important}.dark .login-card small,.dark .login-card p,.dark .entry-visual span,.dark .frequency-list button small,.dark .matching-preferences small,.dark .care-cards p,.dark .presence-card small,.dark .inbox-card small,.dark .my-account-note span,.dark .agreement-card span,.dark .payment-box p{color:#94a3b8!important}.dark .secondary-button,.dark .verified-pill,.dark .behavior-note,.dark .match-accepted-state{background:#272332!important;color:#d8b4fe!important;border-color:#3e3153!important}.dark .match-accepted-state strong{color:#f1f5f9!important}.dark .match-accepted-state span{color:#94a3b8!important}.dark .bubble.other{background:#252a33;color:#e2e8f0}.dark .bubble.mine{background:#30404a;color:#f1f5f9}.dark .chat-policy,.dark .chat-input{background:#1b1e24;color:#cbd5e1;border-color:#30343d}.dark .chat-input input{background:#252a33;color:#f1f5f9;border-color:#3b424e}.dark .care-hero,.dark .paid-state{background:#1d302b;color:#a7f3d0}.dark .care-modal-head button,.dark .back-button{color:#94a3b8}.dark .reason-list>div{border-color:#30343d}.dark .reason-list p,.dark .profile-top p{color:#94a3b8}.dark .kpi-grid>div,.dark .funnel-card,.dark .insight-card,.dark .operator-note{background:#1b1e24;color:#e2e8f0;border-color:#30343d}.dark .kpi-grid span,.dark .kpi-grid small,.dark .funnel-row,.dark .operator-note p{color:#94a3b8}.dark .dashboard-top h1{color:#f1f5f9}.dark .dashboard-top p{color:#94a3b8}.dark .topbar img{filter:brightness(1.15)}
+.chat-inbox .inbox-card,.my-page .my-profile-card,.my-page .my-setting-list,.my-page .my-account-note{border:0!important;border-radius:22px!important;background:#fff!important;box-shadow:0 2px 12px rgba(0,0,0,.03)!important}.chat-inbox .inbox-card{padding:16px!important}.chat-inbox .inbox-avatar{background:#f8fafc!important;color:#64748b!important}.chat-inbox .inbox-avatar.pending{background:#f8fafc!important;color:#94a3b8!important}.chat-inbox .inbox-empty{padding:12px 2px!important;background:transparent!important;color:#94a3b8!important}.chat-inbox .inbox-section h3{color:#334155}.chat-inbox .inbox-action{border-radius:14px!important}.my-page .my-profile-card{padding:20px!important;background:#fff!important}.my-page .my-profile-avatar{background:#f8fafc!important;color:#64748b!important}.my-page .my-profile-card>svg{color:#94a3b8!important}.my-page .my-setting-list{border:0!important}.my-page .my-setting-list>div{border-bottom:1px solid #f1f5f9!important}.my-page .my-setting-icon{background:#f8fafc!important;color:#64748b!important}.my-page .logout-button{border:0!important;border-radius:16px!important;background:#f8fafc!important;color:#64748b!important}.chat-page .chat-policy,.chat-page .chat-benefit-warning,.chat-page .preauth-note{border:0!important;border-radius:16px!important;background:#f8fafc!important;color:#64748b!important;box-shadow:none!important}.chat-page .chat-input{border:0!important;box-shadow:0 -2px 8px rgba(0,0,0,.03)!important}.chat-page .chat-input input{border:0!important;background:#f8fafc!important;border-radius:16px!important}.chat-page .chat-confirm{border-radius:16px!important}
+.lounge-shopping .shopping-items{display:flex!important;flex-direction:column!important;gap:0!important}.lounge-shopping .shopping-item{display:grid!important;grid-template-columns:36px minmax(0,1fr) auto!important;align-items:center!important;column-gap:10px!important;padding:13px 2px!important;border:0!important;border-bottom:1px solid #f1f5f9!important;border-radius:0!important;background:#fff!important;color:#334155!important}.lounge-shopping .shopping-item:last-child{border-bottom:0}.lounge-shopping .shopping-item:hover{background:#fff!important;color:#0f172a!important}.lounge-shopping .shopping-emoji{width:32px;height:32px;display:grid;place-items:center;border-radius:10px;background:#f8fafc;font-size:20px}.lounge-shopping .shopping-item strong{font-size:12px}.lounge-shopping .shopping-item small{font-size:10px;color:#94a3b8}.lounge-shopping .shopping-item svg{position:static;color:#94a3b8}.lounge-shopping .shared-purchase{margin-top:12px;padding:12px 2px;border-radius:0;background:#f8fafc}.lounge-shopping .shared-purchase button{border:0;border-radius:12px;background:#fff;color:#64748b;padding:9px 11px;box-shadow:0 1px 4px rgba(0,0,0,.04)}.lounge-shopping .shopping-banner{margin-top:10px;padding:12px 2px;border-radius:0;background:#fff;color:#475569;border-top:1px solid #f1f5f9}.lounge-shopping .shopping-banner>span{font-size:18px}.lounge-shopping .shopping-banner small{color:#94a3b8}
+.lounge-shopping .shopping-items{display:grid!important;grid-template-columns:repeat(4,minmax(0,1fr))!important;gap:8px!important}.lounge-shopping .shopping-item{display:flex!important;min-width:0!important;flex-direction:column!important;align-items:flex-start!important;gap:3px!important;padding:10px 6px!important;border:0!important;border-radius:14px!important;background:#f8fafc!important}.lounge-shopping .shopping-item:last-child{border-bottom:0}.lounge-shopping .shopping-emoji{width:30px;height:30px}.lounge-shopping .shopping-item strong{font-size:10px;white-space:nowrap}.lounge-shopping .shopping-item small{font-size:8px;white-space:nowrap}.lounge-shopping .shopping-item svg{position:absolute!important;right:5px;bottom:7px}
+.resident-lounge .lounge-shopping{height:286px!important;min-height:286px!important;overflow:hidden!important}.resident-lounge .lounge-shopping-head{height:28px!important;margin-bottom:10px!important}.resident-lounge .lounge-shopping-head strong{font-size:18px!important}.resident-lounge .lounge-shopping-head>small{font-size:10px!important}.resident-lounge .shopping-items{height:100px!important;grid-template-rows:1fr!important}.resident-lounge .shopping-item{height:100px!important;overflow:hidden!important;justify-content:flex-start!important;padding:13px 8px!important}.resident-lounge .shopping-item strong{font-size:13px!important;line-height:1.25!important}.resident-lounge .shopping-item small{font-size:10px!important;line-height:1.25!important}.resident-lounge .shared-purchase{height:50px!important;min-height:50px!important;box-sizing:border-box!important;margin-top:12px!important;overflow:hidden!important}.resident-lounge .shared-purchase strong{font-size:13px!important}.resident-lounge .shared-purchase small{font-size:9px!important}.resident-lounge .shopping-banner{height:56px!important;box-sizing:border-box!important;overflow:hidden!important}.resident-lounge .shopping-banner strong{font-size:13px!important}.resident-lounge .shopping-banner small{font-size:10px!important}
+.my-page .my-account-note{justify-content:flex-start!important;gap:28px!important;padding-left:14px!important}.my-page .my-account-note strong{margin-left:0!important}
+.inner-page:has(.match-score) .match-score,.inner-page:has(.match-score) .profile-card{border:0!important;border-radius:24px!important;box-shadow:0 2px 12px rgba(0,0,0,.03)!important;background:#fff!important}.inner-page:has(.match-score) .match-score{padding:22px!important}.inner-page:has(.match-score) .profile-card{padding:20px!important}.inner-page:has(.match-score) .reason-list>div{border-bottom:1px solid #f1f5f9!important;padding:13px 2px!important}.inner-page:has(.match-score) .reason-list>div>span{background:#f8fafc!important;color:#64748b!important;border-radius:12px!important}.inner-page:has(.match-score) .reason-list>div>svg{color:#94a3b8!important}.inner-page:has(.match-score) .primary-button{width:100%!important;border-radius:16px!important;padding:16px!important;background:#1e293b!important;box-shadow:none!important}.inner-page:has(.match-score) .primary-button:hover{background:#0f172a!important}.inner-page:has(.match-score) .score-ring{background:#fff!important;border-color:#cbd5e1!important}.inner-page:has(.match-score) .verified-pill{background:#f8fafc!important;color:#64748b!important}
+.care-page .care-page-badge{background:transparent!important;border:0!important;color:#64748b!important;padding:0!important;font-size:12px!important;font-weight:700!important;letter-spacing:0!important}
+.care-page .care-celebrate{display:none!important}
+.care-page .care-dday-card,.care-page .presence-card,.care-page .care-timeline-item,.care-page .care-action-card,.care-page .care-support-card{border:0!important;border-radius:22px!important;background:#fff!important;box-shadow:0 2px 12px rgba(0,0,0,.04)!important}
+.care-page .care-dday-card{padding:20px!important;background:#f8fafc!important;color:#1e293b!important}
+.care-page .care-dday-card h3,.care-page .care-dday-card strong,.care-page .care-dday-card p{color:#1e293b!important}
+.care-page .care-dday-card .care-dday-row{color:#334155!important}
+.care-page .care-dday-card .care-dday-row span{color:#64748b!important;font-weight:600!important}
+.care-page .care-dday-card .care-dday-row strong,.care-page .care-dday-card .care-dday-row b{color:#0f172a!important;font-weight:800!important}
+.care-page .care-dday-card>p{color:#64748b!important;font-weight:500!important}
+.care-page .care-progress{background:#e2e8f0!important;height:8px!important;border-radius:999px!important}
+.care-page .care-progress>span{background:#64748b!important;border-radius:999px!important}
+.care-page .care-section-title{color:#334155!important;font-size:13px!important;font-weight:700!important;letter-spacing:0!important}
+.care-page .care-timeline{gap:10px!important}
+.care-page .care-timeline-item{padding:15px 16px!important}
+.care-page .care-timeline-item>span:first-child{background:#f1f5f9!important;color:#64748b!important;border:0!important}
+.care-page .care-action-grid{display:grid!important;grid-template-columns:1fr!important;gap:10px!important}
+.care-page .care-action-card{width:100%!important;min-height:64px!important;padding:14px 16px!important;display:flex!important;align-items:center!important;gap:12px!important;text-align:left!important}
+.care-page .care-action-card .care-action-icon{background:#f1f5f9!important;color:#64748b!important;border:0!important;box-shadow:none!important}
+.care-page .care-action-card h4,.care-page .care-action-card p{color:#334155!important}
+.care-page .care-action-card p{color:#94a3b8!important}
+.care-page .care-notice,.care-page .care-support-card{background:#f8fafc!important;color:#64748b!important;border:0!important}
+.care-page .care-support-card{padding:16px!important}
+.care-page .care-modal,.care-page .care-bottom-sheet{border:0!important;border-radius:24px!important;box-shadow:0 12px 40px rgba(15,23,42,.16)!important;background:#fff!important}
+.care-page .presence-options button,.care-page .care-rule{border:0!important;border-radius:16px!important;background:#f8fafc!important;box-shadow:none!important}
+.care-page .presence-options button:hover{background:#f1f5f9!important}

@@ -108,6 +108,15 @@ http://localhost:5173/?demo=dual
 http://localhost:5173/?lounge=true
 ```
 
+### 픽셀 라운지 직접 편집
+
+라운지 바닥·벽·러그를 16px 격자에 칠하고, 가구와 캐릭터를 직접 이동할 수 있습니다.
+`저장`은 현재 브라우저에 보관하며, JSON 내보내기/불러오기로 맵 파일을 백업할 수 있습니다.
+
+```text
+http://localhost:5173/?mapEditor=true
+```
+
 ### 운영사 임베드 유입
 
 운영사와 객실 정보를 URL 세션에 기록합니다.

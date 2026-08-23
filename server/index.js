@@ -62,6 +62,59 @@ function requireToken(req, res, next) { const token = req.headers.authorization?
 function requireOperator(req, res, next) { if (req.auth.role !== 'operator') return res.status(403).json({ error: 'OPERATOR_ROLE_REQUIRED' }); return next(); }
 function requireDatabase(req, res, next) { if (!getPrisma()) return res.status(503).json({ error: 'PERSISTENCE_REQUIRED' }); return next(); }
 
+// Typed chat-session compatibility layer. PRE_MOVE remains the default for the
+// existing inbox, while ROOMMATE is created after both payments are captured.
+const chatSessionType = (value) => value === 'ROOMMATE' ? 'ROOMMATE' : 'PRE_MOVE';
+const chatRoomName = (type, matchId) => `chat:${type === 'ROOMMATE' ? 'roommate' : 'pre-move'}:${matchId}`;
+const chatMessageKey = (type, matchId) => `${chatRoomName(type, matchId)}:messages`;
+const chatMetaKey = (type, matchId) => `${chatRoomName(type, matchId)}:meta`;
+
+app.get('/api/v1/chat/rooms', requireToken, async (req, res, next) => {
+  if (!databaseEnabled()) return next('route');
+  try {
+    const type = chatSessionType(req.query.type);
+    const rows = await getPrisma().match.findMany({ where: { OR: [{ tenantAId: req.auth.sub }, { tenantBId: req.auth.sub }], status: { in: ['ACCEPTED', 'CONFIRMED'] }, deletedAt: null }, include: { tenantA: { select: { id: true, pseudonym: true } }, tenantB: { select: { id: true, pseudonym: true } }, chatSessions: { where: { type, deletedAt: null }, orderBy: { updatedAt: 'desc' }, take: 1 } }, orderBy: { updatedAt: 'desc' } });
+    return res.json({ rooms: rows.map((row) => ({ matchId: row.id, compatibility: row.compatibilityScore, score: row.compatibilityScore, partner: row.tenantAId === req.auth.sub ? row.tenantB : row.tenantA, chat: row.chatSessions[0] || null, type })) });
+  } catch (error) { return next(error); }
+});
+
+app.post('/api/v1/matches/:id/chat-sessions', requireToken, async (req, res, next) => {
+  if (!databaseEnabled()) return next('route');
+  try {
+    const prisma = getPrisma();
+    const type = chatSessionType(req.body?.type);
+    const match = await prisma.match.findFirst({ where: { id: req.params.id, OR: [{ tenantAId: req.auth.sub }, { tenantBId: req.auth.sub }], deletedAt: null } });
+    if (!match) return res.status(404).json({ error: 'MATCH_NOT_FOUND' });
+    if (type === 'ROOMMATE' && match.status !== 'CONFIRMED') return res.status(409).json({ error: 'MOVE_IN_NOT_CONFIRMED' });
+    const existing = await prisma.chatSession.findUnique({ where: { matchId_type: { matchId: match.id, type } } });
+    const active = existing && existing.status === 'ACTIVE' && (type === 'ROOMMATE' || (existing.expiresAt && existing.expiresAt > new Date()));
+    if (active) return res.json({ chat: { id: existing.id, matchId: existing.matchId, type: existing.type, expiresAt: existing.expiresAt, reused: true } });
+    const chat = await prisma.chatSession.upsert({ where: { matchId_type: { matchId: match.id, type } }, update: { status: 'ACTIVE', expiresAt: type === 'ROOMMATE' ? null : new Date(Date.now() + 1800000), deletedAt: null }, create: { matchId: match.id, type, status: 'ACTIVE', expiresAt: type === 'ROOMMATE' ? null : new Date(Date.now() + 1800000) } });
+    return res.status(201).json({ chat: { id: chat.id, matchId: chat.matchId, type: chat.type, expiresAt: chat.expiresAt } });
+  } catch (error) { return next(error); }
+});
+
+app.post('/api/v1/payments/:id/capture', requireToken, async (req, res, next) => {
+  if (!databaseEnabled()) return next('route');
+  try {
+    const prisma = getPrisma();
+    const payment = await prisma.payment.findUnique({ where: { id: req.params.id }, include: { match: true } });
+    if (!payment?.match || ![payment.match.tenantAId, payment.match.tenantBId].includes(req.auth.sub)) return res.status(404).json({ error: 'PAYMENT_NOT_FOUND' });
+    const paidTenantIds = [...new Set([...(payment.paidTenantIds || []), req.auth.sub])];
+    const complete = paidTenantIds.includes(payment.match.tenantAId) && paidTenantIds.includes(payment.match.tenantBId);
+    const result = await prisma.$transaction(async (tx) => {
+      const updatedPayment = await tx.payment.update({ where: { id: payment.id }, data: { paidTenantIds, status: complete ? 'PAID' : 'READY', paidAt: complete ? new Date() : null } });
+      if (complete) {
+        await tx.chatSession.updateMany({ where: { matchId: payment.match.id, type: 'PRE_MOVE', deletedAt: null }, data: { status: 'READ_ONLY' } });
+        await tx.chatSession.upsert({ where: { matchId_type: { matchId: payment.match.id, type: 'ROOMMATE' } }, update: { status: 'ACTIVE', expiresAt: null, deletedAt: null }, create: { matchId: payment.match.id, type: 'ROOMMATE', status: 'ACTIVE', expiresAt: null } });
+        await tx.match.update({ where: { id: payment.match.id }, data: { status: 'CONFIRMED', confirmedAt: new Date() } });
+      }
+      return updatedPayment;
+    });
+    return res.json({ payment: result, allTenantsPaid: complete, waitingForOtherTenant: !complete, deadlineMinutes: 10 });
+  } catch (error) { return next(error); }
+});
+
 const allowedConflictCategories = new Set(['noise', 'cleaning', 'guests', 'shared_space', 'sleep_schedule', 'communication', 'other']);
 const allowedRoomTypes = new Set(['private_room', 'shared_room', 'multi_room']);
 const allowedShareCounts = new Set([2, 3, 4]);
@@ -112,9 +165,10 @@ app.put('/api/v1/behavior-profiles/me', requireToken, async (req, res, next) => 
 app.get('/api/v1/behavior-profiles/me', requireToken, async (req, res, next) => { try { if (databaseEnabled()) { const profile = await getPrisma().behaviorProfile.findUnique({ where: { tenantId: req.auth.sub }, select: { answers: true, completedAt: true } }); return res.json({ profile: profile?.answers || null, completed: Boolean(profile?.completedAt), completedAt: profile?.completedAt || null }); } return res.json({ profile: store.profiles.get(req.auth.sub) || null, completed: Boolean(store.profileCompletedAt.get(req.auth.sub)), completedAt: store.profileCompletedAt.get(req.auth.sub) || null }); } catch (error) { return next(error); } });
 // Database-backed matching flow. The legacy in-memory implementation below is used only in MOCK_MODE.
 app.post('/api/v1/matches', requireToken, async (req, res, next) => { if (!databaseEnabled()) return next('route'); try { const prisma = getPrisma(); const candidateId = req.body.candidateId; const candidate = await prisma.tenant.findUnique({ where: { id: candidateId }, include: { behaviorProfile: true } }); const own = await prisma.behaviorProfile.findUnique({ where: { tenantId: req.auth.sub } }); if (!candidate?.behaviorProfile || !own?.completedAt) return res.status(400).json({ error: 'PROFILE_REQUIRED' }); const room = await prisma.room.findFirst({ where: { status: 'VACANT', deletedAt: null } }); if (!room) return res.status(409).json({ error: 'NO_AVAILABLE_ROOM' }); const existing = await prisma.match.findFirst({ where: { OR: [{ tenantAId: req.auth.sub, tenantBId: candidateId }, { tenantAId: candidateId, tenantBId: req.auth.sub }], roomId: room.id, deletedAt: null } }); if (existing) return res.json({ match: { id: existing.id, memberIds: [existing.tenantAId, existing.tenantBId], status: existing.status.toLowerCase() }, reused: true }); const reverse = await prisma.match.findFirst({ where: { tenantAId: candidateId, tenantBId: req.auth.sub, status: 'REQUESTED', deletedAt: null } }); const result = scoreCompatibility(own.answers, candidate.behaviorProfile.answers, store.rules); const match = reverse ? await prisma.match.update({ where: { id: reverse.id }, data: { status: 'ACCEPTED', acceptedAt: new Date(), compatibilityScore: result.score, scoreBreakdown: result.breakdown } }) : await prisma.match.create({ data: { tenantAId: req.auth.sub, tenantBId: candidateId, roomId: room.id, compatibilityScore: result.score, scoreBreakdown: result.breakdown, status: 'REQUESTED' } }); return res.status(reverse ? 200 : 201).json({ match: { id: match.id, memberIds: [match.tenantAId, match.tenantBId], status: match.status.toLowerCase(), compatibility: match.compatibilityScore, breakdown: match.scoreBreakdown }, mutual: Boolean(reverse) }); } catch (error) { return next(error); } });
-app.get('/api/v1/chat/requests', requireToken, async (req, res, next) => { if (!databaseEnabled()) return next('route'); try { const rows = await getPrisma().match.findMany({ where: { tenantBId: req.auth.sub, status: 'REQUESTED', deletedAt: null }, include: { tenantA: { select: { id: true, pseudonym: true } } }, orderBy: { createdAt: 'desc' } }); return res.json({ requests: rows.map((row) => ({ id: row.id, from: row.tenantA, createdAt: row.createdAt })) }); } catch (error) { return next(error); } });
+app.get('/api/v1/chat/requests', requireToken, async (req, res, next) => { if (!databaseEnabled()) return next('route'); try { const rows = await getPrisma().match.findMany({ where: { tenantBId: req.auth.sub, status: 'REQUESTED', deletedAt: null }, include: { tenantA: { select: { id: true, pseudonym: true } } }, orderBy: { createdAt: 'desc' } }); return res.json({ requests: rows.map((row) => ({ id: row.id, from: row.tenantA, compatibility: row.compatibilityScore, score: row.compatibilityScore, createdAt: row.createdAt })) }); } catch (error) { return next(error); } });
+app.get('/api/v1/chat/requests/sent', requireToken, async (req, res, next) => { if (!databaseEnabled()) return next('route'); try { const rows = await getPrisma().match.findMany({ where: { tenantAId: req.auth.sub, status: 'REQUESTED', deletedAt: null }, include: { tenantB: { select: { id: true, pseudonym: true } } }, orderBy: { createdAt: 'desc' } }); return res.json({ requests: rows.map((row) => ({ id: row.id, to: row.tenantB, compatibility: row.compatibilityScore, score: row.compatibilityScore, createdAt: row.createdAt })) }); } catch (error) { return next(error); } });
 app.post('/api/v1/chat/requests/:id/accept', requireToken, async (req, res, next) => { if (!databaseEnabled()) return next('route'); try { const match = await getPrisma().match.updateMany({ where: { id: req.params.id, tenantBId: req.auth.sub, status: 'REQUESTED', deletedAt: null }, data: { status: 'ACCEPTED', acceptedAt: new Date() } }); if (match.count !== 1) return res.status(404).json({ error: 'REQUEST_NOT_FOUND' }); return res.json({ accepted: true }); } catch (error) { return next(error); } });
-app.get('/api/v1/chat/rooms', requireToken, async (req, res, next) => { if (!databaseEnabled()) return next('route'); try { const rows = await getPrisma().match.findMany({ where: { OR: [{ tenantAId: req.auth.sub }, { tenantBId: req.auth.sub }], status: 'ACCEPTED', deletedAt: null }, include: { tenantA: { select: { id: true, pseudonym: true } }, tenantB: { select: { id: true, pseudonym: true } }, chatSession: true }, orderBy: { updatedAt: 'desc' } }); return res.json({ rooms: rows.map((row) => ({ matchId: row.id, partner: row.tenantAId === req.auth.sub ? row.tenantB : row.tenantA, chat: row.chatSession })) }); } catch (error) { return next(error); } });
+app.get('/api/v1/chat/rooms', requireToken, async (req, res, next) => { if (!databaseEnabled()) return next('route'); try { const rows = await getPrisma().match.findMany({ where: { OR: [{ tenantAId: req.auth.sub }, { tenantBId: req.auth.sub }], status: 'ACCEPTED', deletedAt: null }, include: { tenantA: { select: { id: true, pseudonym: true } }, tenantB: { select: { id: true, pseudonym: true } }, chatSession: true }, orderBy: { updatedAt: 'desc' } }); return res.json({ rooms: rows.map((row) => ({ matchId: row.id, compatibility: row.compatibilityScore, score: row.compatibilityScore, partner: row.tenantAId === req.auth.sub ? row.tenantB : row.tenantA, chat: row.chatSession })) }); } catch (error) { return next(error); } });
 app.get('/api/v1/matches/candidates', requireToken, async (req, res, next) => { if (!databaseEnabled()) return next('route'); try { const prisma = getPrisma(); const own = await prisma.behaviorProfile.findUnique({ where: { tenantId: req.auth.sub } }); if (!own?.completedAt) return res.status(404).json({ error: 'PROFILE_NOT_FOUND' }); const profiles = await prisma.behaviorProfile.findMany({ where: { tenantId: { not: req.auth.sub }, completedAt: { not: null }, deletedAt: null }, include: { tenant: { select: { id: true, pseudonym: true, age: true, gender: true } } } }); const candidates = profiles.map((item) => { const result = scoreCompatibility(own.answers, item.answers, store.rules); return { candidateId: item.tenantId, pseudonym: 'Anonymous tenant', compatibility: result.score, score: result.score, breakdown: result.breakdown, bestReasons: result.bestReasons, watchouts: result.watchouts }; }); const activeMatch = await prisma.match.findFirst({ where: { OR: [{ tenantAId: req.auth.sub }, { tenantBId: req.auth.sub }], status: { in: ['ACCEPTED', 'CONFIRMED'] }, deletedAt: null }, select: { id: true, tenantAId: true, tenantBId: true, status: true, compatibilityScore: true, scoreBreakdown: true } }); return res.json({ rules: store.rules, preferences: {}, totalCandidates: candidates.length, recommended: candidates[0] || null, activeMatch: activeMatch ? { id: activeMatch.id, memberIds: [activeMatch.tenantAId, activeMatch.tenantBId], status: activeMatch.status.toLowerCase(), compatibility: activeMatch.compatibilityScore, breakdown: activeMatch.scoreBreakdown } : null, candidates }); } catch (error) { return next(error); } });
 app.post('/api/v1/matches', requireToken, async (req, res, next) => { if (!databaseEnabled()) return next('route'); try { const prisma = getPrisma(); const candidate = await prisma.tenant.findUnique({ where: { id: req.body.candidateId }, include: { behaviorProfile: true } }); const own = await prisma.behaviorProfile.findUnique({ where: { tenantId: req.auth.sub } }); if (!candidate?.behaviorProfile || !own?.completedAt) return res.status(400).json({ error: 'PROFILE_REQUIRED' }); const room = await prisma.room.findFirst({ where: { status: 'VACANT', deletedAt: null } }); if (!room) return res.status(409).json({ error: 'NO_AVAILABLE_ROOM' }); const result = scoreCompatibility(own.answers, candidate.behaviorProfile.answers, store.rules); const match = await prisma.match.create({ data: { tenantAId: req.auth.sub, tenantBId: candidate.id, roomId: room.id, compatibilityScore: result.score, scoreBreakdown: result.breakdown, status: 'ACCEPTED', acceptedAt: new Date() } }); return res.status(201).json({ match: { id: match.id, memberIds: [match.tenantAId, match.tenantBId], status: 'accepted', compatibility: match.compatibilityScore, breakdown: match.scoreBreakdown } }); } catch (error) { return next(error); } });
 app.post('/api/v1/matches/:id/preauthorize', requireToken, async (req, res, next) => { if (!databaseEnabled()) return next('route'); try { const prisma = getPrisma(); const match = await prisma.match.findFirst({ where: { id: req.params.id, OR: [{ tenantAId: req.auth.sub }, { tenantBId: req.auth.sub }], deletedAt: null } }); if (!match) return res.status(404).json({ error: 'MATCH_NOT_FOUND' }); const payment = await prisma.payment.upsert({ where: { matchId: match.id }, update: {}, create: { matchId: match.id, amountKrw: Number(req.body.amountKrw) || 30000, status: 'READY', provider: 'PG_PREAUTH', idempotencyKey: `preauth:${match.id}` } }); return res.status(201).json({ payment }); } catch (error) { return next(error); } });
@@ -149,6 +203,47 @@ app.post('/api/v1/feedback', requireToken, (req, res) => { const checkpoint = Nu
 app.get('/api/v1/operators/:operatorId/feedback-insights', requireToken, requireOperator, (req, res) => { if (req.auth.operatorId !== req.params.operatorId) return res.status(403).json({ error: 'OPERATOR_SCOPE_REQUIRED' }); const labels = [...store.feedback.values()]; const conflicts = labels.filter((item) => item.label === 'compatibility_risk'); const categories = conflicts.flatMap((item) => item.conflictCategories || []).reduce((counts, category) => ({ ...counts, [category]: (counts[category] || 0) + 1 }), {}); res.json({ trainingSamples: labels.length, conflictSamples: conflicts.length, stableSamples: labels.filter((item) => item.label === 'stable_match').length, conflictCategories: categories, topPatterns: [...store.patternAggregates.values()].sort((a, b) => b.conflictSamples - a.conflictSamples).slice(0, 10) }); });
 app.get('/api/v1/operators/:operatorId/dashboard', requireToken, requireOperator, (req, res) => { if (req.auth.operatorId !== req.params.operatorId) return res.status(403).json({ error: 'OPERATOR_SCOPE_REQUIRED' }); const events = store.funnelEvents.filter(item => item.operatorId === req.params.operatorId); const count = (step, fallback) => { const value = new Set(events.filter(item => item.step === step).map(item => item.funnelId)).size; return value || fallback; }; const tickets = [...store.tickets.values()].filter(ticket => ticket.operatorId === req.params.operatorId && ticket.status !== 'closed'); res.json({ kpis: [{ label: 'Monthly entries', value: String(count('entry', 248)), change: '+12%' }, { label: 'Verification complete', value: '82%', change: '+6.4%p' }, { label: 'Match success', value: '61%', change: '+8.1%p' }, { label: '30-day retention', value: '94%', change: '+4.0%p' }], funnel: [{ label: 'Entry', value: count('entry', 248) }, { label: 'Survey', value: count('survey', 203) }, { label: 'Match', value: count('match', 149) }, { label: 'Move-in', value: count('contract_confirmed', 91) }], openMediationTickets: tickets.length, recentTickets: tickets.slice(0, 5) }); });
 io.use((socket, next) => { try { socket.user = jwt.verify(socket.handshake.auth?.token, JWT_SECRET, { issuer: 'checkmate' }); next(); } catch { next(new Error('UNAUTHORIZED')); } });
+// Typed transport used by the two chat lifecycles. Legacy events below remain
+// available for existing clients, while these events isolate Redis rooms and
+// enforce match membership before joining or sending.
+io.on('connection', (socket) => {
+  socket.on('chat:join:typed', async ({ matchId, type = 'PRE_MOVE' } = {}, callback) => {
+    const sessionType = chatSessionType(type);
+    let match = null;
+    let session = null;
+    if (databaseEnabled()) {
+      match = await getPrisma().match.findFirst({ where: { id: matchId, deletedAt: null, OR: [{ tenantAId: socket.user.sub }, { tenantBId: socket.user.sub }] } }).catch(() => null);
+      session = match ? await getPrisma().chatSession.findUnique({ where: { matchId_type: { matchId, type: sessionType } } }).catch(() => null) : null;
+    } else {
+      match = store.matches.get(matchId);
+      session = store.chats.get(`${sessionType}:${matchId}`) || store.chats.get(matchId);
+    }
+    if (!match || !session || (databaseEnabled() && sessionType === 'ROOMMATE' && match.status !== 'CONFIRMED')) return callback?.({ error: 'CHAT_ACCESS_DENIED' });
+    if (String(session.status).toUpperCase() !== 'ACTIVE' || (session.expiresAt && Date.parse(session.expiresAt) <= Date.now())) return callback?.({ error: 'CHAT_UNAVAILABLE' });
+    const roomName = chatRoomName(sessionType, matchId);
+    socket.join(roomName);
+    const metaKey = chatMetaKey(sessionType, matchId);
+    if (redisClient && databaseEnabled()) await redisClient.setEx(metaKey, sessionType === 'ROOMMATE' ? 60 * 60 * 24 * 365 : Math.max(1, Math.ceil((Date.parse(session.expiresAt) - Date.now()) / 1000)), JSON.stringify({ id: session.id, matchId, type: sessionType, expiresAt: session.expiresAt, status: session.status.toLowerCase() }));
+    const messages = redisClient ? (await redisClient.lRange(chatMessageKey(sessionType, matchId), 0, -1)).map(JSON.parse) : (session.messages || []);
+    return callback?.({ ok: true, type: sessionType, expiresAt: session.expiresAt, messages });
+  });
+  socket.on('chat:message:typed', async ({ matchId, type = 'PRE_MOVE', text } = {}, callback) => {
+    const sessionType = chatSessionType(type);
+    const roomName = chatRoomName(sessionType, matchId);
+    const match = databaseEnabled() ? await getPrisma().match.findFirst({ where: { id: matchId, deletedAt: null, OR: [{ tenantAId: socket.user.sub }, { tenantBId: socket.user.sub }] } }).catch(() => null) : store.matches.get(matchId);
+    if (!match || !socket.rooms.has(roomName)) return callback?.({ error: 'CHAT_ACCESS_DENIED' });
+    const session = databaseEnabled() ? await getPrisma().chatSession.findUnique({ where: { matchId_type: { matchId, type: sessionType } } }).catch(() => null) : (store.chats.get(`${sessionType}:${matchId}`) || store.chats.get(matchId));
+    const rawText = typeof text === 'string' ? text.trim() : '';
+    if (!session || String(session.status).toUpperCase() !== 'ACTIVE' || (session.expiresAt && Date.parse(session.expiresAt) <= Date.now()) || !rawText || rawText.length > 500) return callback?.({ error: 'MESSAGE_REJECTED' });
+    const filtered = maskContactInfo(rawText);
+    const message = { id: createId(), sentAt: new Date().toISOString(), from: socket.user.sub, text: filtered.text, contactMasked: filtered.detected };
+    if (redisClient) { const ttl = session.expiresAt ? Math.max(1, Math.ceil((Date.parse(session.expiresAt) - Date.now()) / 1000)) : 60 * 60 * 24 * 365; await redisClient.multi().rPush(chatMessageKey(sessionType, matchId), JSON.stringify(message)).expire(chatMessageKey(sessionType, matchId), ttl).exec(); }
+    else if (session.messages) session.messages.push(message);
+    io.to(roomName).emit('chat:message:typed', message);
+    if (filtered.detected) socket.emit('chat:policy-warning', { message: '연락처 공유는 안심 채팅에서 제한됩니다.' });
+    return callback?.({ ok: true, contactMasked: filtered.detected });
+  });
+});
 // Hydrate DB-backed chat sessions into the Redis/memory transport before the legacy socket handlers run.
 io.on('connection', (socket) => { socket.on('chat:join', async ({ matchId }) => { if (store.chats.has(matchId) || !databaseEnabled()) return; const session = await getPrisma().chatSession.findUnique({ where: { matchId } }).catch(() => null); if (session) store.chats.set(matchId, { id: session.id, matchId, expiresAt: session.expiresAt.toISOString(), status: session.status.toLowerCase(), messages: [] }); }); });
 io.on('connection', (socket) => { socket.on('chat:join', async ({ matchId }, callback) => { let chat = store.chats.get(matchId); if (!chat && redisClient) { const metadata = await redisClient.get(`chat:${matchId}:meta`); if (metadata) { chat = JSON.parse(metadata); chat.messages = []; store.chats.set(matchId, chat); } } if (!chat || chat.status !== 'active' || Date.parse(chat.expiresAt) <= Date.now()) return callback?.({ error: 'CHAT_UNAVAILABLE' }); socket.join(`chat:${matchId}`); const messages = redisClient ? (await redisClient.lRange(`chat:${matchId}:messages`, 0, -1)).map(JSON.parse) : chat.messages; return callback?.({ ok: true, expiresAt: chat.expiresAt, messages }); }); socket.on('chat:message', async ({ matchId, text }, callback) => { let chat = store.chats.get(matchId); if (!chat && redisClient) { const metadata = await redisClient.get(`chat:${matchId}:meta`); if (metadata) { chat = JSON.parse(metadata); chat.messages = []; store.chats.set(matchId, chat); } } const rawText = typeof text === 'string' ? text.trim() : ''; if (!chat || chat.status !== 'active' || Date.parse(chat.expiresAt) <= Date.now() || !rawText || rawText.length > 500) return callback?.({ error: 'MESSAGE_REJECTED' }); const filtered = maskContactInfo(rawText); const message = { id: createId(), sentAt: new Date().toISOString(), from: socket.user.sub, text: filtered.text, contactMasked: filtered.detected }; const ttl = Math.max(1, Math.ceil((Date.parse(chat.expiresAt) - Date.now()) / 1000)); if (redisClient) await redisClient.multi().rPush(`chat:${matchId}:messages`, JSON.stringify(message)).expire(`chat:${matchId}:messages`, ttl).exec(); else chat.messages.push(message); io.to(`chat:${matchId}`).emit('chat:message', message); if (filtered.detected) socket.emit('chat:policy-warning', { message: '???源놁벁??癲ル슢????닱????ш낄援?????ㅻ깹??異????????????モ뵲???寃뗏????怨?????덊렡. ?濡ろ뜏?????ш끽維????癲ル슔?됭짆?륂렭?????????嶺뚮Ĳ?됮????낆뒩??뗫빝??' }); return callback?.({ ok: true, contactMasked: filtered.detected }); }); });

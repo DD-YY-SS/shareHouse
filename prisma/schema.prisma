@@ -58,6 +58,11 @@ enum ChatSessionStatus {
   EXPIRED
 }
 
+enum ChatSessionType {
+  PRE_MOVE
+  ROOMMATE
+}
+
 enum AgreementStatus {
   DRAFT
   PARTIALLY_SIGNED
@@ -298,7 +303,7 @@ model Match {
   room        Room              @relation(fields: [roomId], references: [id])
   payment     Payment?
   contract    Contract?
-  chatSession ChatSession?
+  chatSessions ChatSession[]
   agreement   DigitalAgreement?
   careCheckins CareCheckin[]
 
@@ -502,9 +507,10 @@ model AgreementSignature {
 
 model ChatSession {
   id        String            @id @default(uuid()) @db.Uuid
-  matchId   String            @unique @db.Uuid
+  matchId   String            @db.Uuid
+  type      ChatSessionType   @default(PRE_MOVE)
   status    ChatSessionStatus @default(ACTIVE)
-  expiresAt DateTime
+  expiresAt DateTime?
   createdAt DateTime          @default(now())
   updatedAt DateTime          @updatedAt
   deletedAt DateTime?
@@ -513,6 +519,7 @@ model ChatSession {
   messages        ChatMessage[]
   behaviorMetrics ChatBehaviorMetric[]
 
+  @@unique([matchId, type])
   @@index([status, expiresAt])
   @@index([deletedAt])
 }
