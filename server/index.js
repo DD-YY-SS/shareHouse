@@ -25,8 +25,20 @@ import { CheckinRepository } from './repositories/checkin.repository.js';
 
 assertProductionConfiguration();
 const app = express(); const server = http.createServer(app); const PORT = Number(process.env.PORT || 4000); const JWT_SECRET = process.env.JWT_SECRET || 'development-only-change-before-production'; const PEPPER = process.env.VERIFICATION_PEPPER || 'development-only-pepper';
+// Render terminates the public connection at a single trusted reverse proxy.
+// Trusting that one hop lets express-rate-limit use the real client IP from
+// X-Forwarded-For without treating the proxy header as an attack.
+app.set('trust proxy', process.env.NODE_ENV === 'production' ? 1 : false);
+const allowedOrigins = new Set((process.env.CLIENT_ORIGIN || 'http://localhost:5173').split(',').map((origin) => origin.trim().replace(/\/$/, '')).filter(Boolean));
+const corsOptions = {
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.has(origin.replace(/\/$/, ''))) return callback(null, true);
+    return callback(new Error('CORS_ORIGIN_NOT_ALLOWED'));
+  },
+  credentials: true,
+};
 globalThis.__checkmateStore = store;
-const io = new Server(server, { cors: { origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173' } });
+const io = new Server(server, { cors: { origin: [...allowedOrigins], credentials: true } });
 let redisClient = null;
 if (process.env.REDIS_URL) {
   let publisher;
@@ -55,7 +67,7 @@ if (process.env.REDIS_URL) {
     console.warn('Redis is unavailable; using in-memory chat fallback. Start Redis to enable shared real-time delivery.');
   }
 }
-app.use(helmet()); app.use(requestId); app.use(httpLogger); app.use(cors({ origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173', credentials: true })); app.use(cookieParser()); app.use(express.json({ limit: '32kb' })); app.use('/api/v1', apiLimiter); app.use('/api/v1/auth/secure', secureAuthRouter());
+app.use(helmet()); app.use(requestId); app.use(httpLogger); app.use(cors(corsOptions)); app.use(cookieParser()); app.use(express.json({ limit: '32kb' })); app.use('/api/v1', apiLimiter); app.use('/api/v1/auth/secure', secureAuthRouter());
 const digest = (value) => crypto.createHmac('sha256', PEPPER).update(value).digest('hex');
 const tokenFor = (user) => jwt.sign({ sub: user.id, role: user.role, operatorId: user.operatorId, jti: createId() }, JWT_SECRET, { issuer: 'checkmate', expiresIn: '30m' });
 function requireToken(req, res, next) { const token = req.headers.authorization?.replace('Bearer ', ''); if (!token) return res.status(401).json({ error: 'UNAUTHORIZED' }); try { req.auth = jwt.verify(token, JWT_SECRET, { issuer: 'checkmate' }); return next(); } catch { return res.status(401).json({ error: 'TOKEN_INVALID_OR_EXPIRED' }); } }
