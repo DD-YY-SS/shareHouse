@@ -61,6 +61,12 @@ const tokenFor = (user) => jwt.sign({ sub: user.id, role: user.role, operatorId:
 function requireToken(req, res, next) { const token = req.headers.authorization?.replace('Bearer ', ''); if (!token) return res.status(401).json({ error: 'UNAUTHORIZED' }); try { req.auth = jwt.verify(token, JWT_SECRET, { issuer: 'checkmate' }); return next(); } catch { return res.status(401).json({ error: 'TOKEN_INVALID_OR_EXPIRED' }); } }
 function requireOperator(req, res, next) { if (req.auth.role !== 'operator') return res.status(403).json({ error: 'OPERATOR_ROLE_REQUIRED' }); return next(); }
 function requireDatabase(req, res, next) { if (!getPrisma()) return res.status(503).json({ error: 'PERSISTENCE_REQUIRED' }); return next(); }
+// A candidate must always be a different tenant. This guard protects both the
+// PostgreSQL flow and the Mock flow from stale UI state or a forged request.
+app.use('/api/v1/matches', requireToken, (req, res, next) => {
+  if (req.method === 'POST' && req.body?.candidateId && req.body.candidateId === req.auth.sub) return res.status(400).json({ error: 'SELF_MATCH_NOT_ALLOWED' });
+  return next();
+});
 
 // Typed chat-session compatibility layer. PRE_MOVE remains the default for the
 // existing inbox, while ROOMMATE is created after both payments are captured.
@@ -73,7 +79,7 @@ app.get('/api/v1/chat/rooms', requireToken, async (req, res, next) => {
   if (!databaseEnabled()) return next('route');
   try {
     const type = chatSessionType(req.query.type);
-    const rows = await getPrisma().match.findMany({ where: { OR: [{ tenantAId: req.auth.sub }, { tenantBId: req.auth.sub }], status: { in: ['ACCEPTED', 'CONFIRMED'] }, deletedAt: null }, include: { tenantA: { select: { id: true, pseudonym: true } }, tenantB: { select: { id: true, pseudonym: true } }, chatSessions: { where: { type, deletedAt: null }, orderBy: { updatedAt: 'desc' }, take: 1 } }, orderBy: { updatedAt: 'desc' } });
+    const rows = await getPrisma().match.findMany({ where: { OR: [{ tenantAId: req.auth.sub }, { tenantBId: req.auth.sub }], status: type === 'ROOMMATE' ? 'CONFIRMED' : { in: ['ACCEPTED', 'CONFIRMED'] }, deletedAt: null }, include: { tenantA: { select: { id: true, pseudonym: true } }, tenantB: { select: { id: true, pseudonym: true } }, chatSessions: { where: { type, deletedAt: null }, orderBy: { updatedAt: 'desc' }, take: 1 } }, orderBy: { updatedAt: 'desc' } });
     return res.json({ rooms: rows.map((row) => ({ matchId: row.id, compatibility: row.compatibilityScore, score: row.compatibilityScore, partner: row.tenantAId === req.auth.sub ? row.tenantB : row.tenantA, chat: row.chatSessions[0] || null, type })) });
   } catch (error) { return next(error); }
 });
@@ -92,6 +98,66 @@ app.post('/api/v1/matches/:id/chat-sessions', requireToken, async (req, res, nex
     const chat = await prisma.chatSession.upsert({ where: { matchId_type: { matchId: match.id, type } }, update: { status: 'ACTIVE', expiresAt: type === 'ROOMMATE' ? null : new Date(Date.now() + 1800000), deletedAt: null }, create: { matchId: match.id, type, status: 'ACTIVE', expiresAt: type === 'ROOMMATE' ? null : new Date(Date.now() + 1800000) } });
     return res.status(201).json({ chat: { id: chat.id, matchId: chat.matchId, type: chat.type, expiresAt: chat.expiresAt } });
   } catch (error) { return next(error); }
+});
+
+// Restore the payment state when the user re-enters the confirmation screen.
+// The payment belongs to the match, so the client must not rely only on
+// component state or a payment id kept in the previous chat session.
+app.get('/api/v1/matches/:id/payment-status', requireToken, async (req, res, next) => {
+  try {
+    if (databaseEnabled()) {
+      const prisma = getPrisma();
+      const match = await prisma.match.findFirst({
+        where: {
+          id: req.params.id,
+          deletedAt: null,
+          OR: [{ tenantAId: req.auth.sub }, { tenantBId: req.auth.sub }],
+        },
+        include: { payment: true },
+      });
+      if (!match) return res.status(404).json({ error: 'MATCH_NOT_FOUND' });
+
+      const payment = match.payment;
+      const paidTenantIds = payment?.paidTenantIds || [];
+      const currentUserPaid = paidTenantIds.includes(req.auth.sub);
+      const allTenantsPaid = [match.tenantAId, match.tenantBId]
+        .every((tenantId) => paidTenantIds.includes(tenantId));
+
+      return res.json({
+        payment: payment ? {
+          id: payment.id,
+          amountKrw: payment.amountKrw,
+          status: payment.status,
+          paidAt: payment.paidAt,
+        } : null,
+        currentUserPaid,
+        allTenantsPaid,
+        matchStatus: match.status,
+      });
+    }
+
+    const match = store.matches.get(req.params.id);
+    if (!match || !match.memberIds.includes(req.auth.sub)) {
+      return res.status(404).json({ error: 'MATCH_NOT_FOUND' });
+    }
+    const payments = [...store.payments.values()].filter((payment) => payment.matchId === match.id);
+    const currentUserPaid = payments.some((payment) => payment.userId === req.auth.sub && payment.status === 'paid');
+    const allTenantsPaid = match.memberIds.every((tenantId) => payments.some((payment) => payment.userId === tenantId && payment.status === 'paid'));
+    const latestPayment = payments.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0] || null;
+    return res.json({
+      payment: latestPayment ? {
+        id: latestPayment.id,
+        amountKrw: latestPayment.amountKrw,
+        status: latestPayment.status,
+        paidAt: latestPayment.capturedAt || null,
+      } : null,
+      currentUserPaid,
+      allTenantsPaid,
+      matchStatus: match.status,
+    });
+  } catch (error) {
+    return next(error);
+  }
 });
 
 app.post('/api/v1/payments/:id/capture', requireToken, async (req, res, next) => {
@@ -113,6 +179,59 @@ app.post('/api/v1/payments/:id/capture', requireToken, async (req, res, next) =>
     });
     return res.json({ payment: result, allTenantsPaid: complete, waitingForOtherTenant: !complete, deadlineMinutes: 10 });
   } catch (error) { return next(error); }
+});
+
+// Mock-mode fallback for the chat inbox. The database routes above intentionally
+// skip themselves when MOCK_MODE=true, so the demo must still expose the same
+// API contract from the in-memory store.
+const mockMatchesForUser = (userId) => [...store.matches.values()].filter((match) => match.memberIds.includes(userId));
+const mockChatRoom = (match, userId, type) => {
+  const partnerId = match.memberIds.find((memberId) => memberId !== userId);
+  const partner = store.users.get(partnerId);
+  const chat = store.chats.get(match.id) || store.chats.get(`${type}:${match.id}`);
+  return {
+    matchId: match.id,
+    compatibility: match.compatibility,
+    score: match.compatibility,
+    partner: partner ? { id: partner.id, pseudonym: partner.pseudonym } : null,
+    chat: chat ? { id: chat.id, matchId: match.id, expiresAt: chat.expiresAt, status: chat.status } : null,
+    type,
+  };
+};
+
+app.get('/api/v1/chat/requests', requireToken, (req, res, next) => {
+  if (databaseEnabled()) return next('route');
+  const requests = mockMatchesForUser(req.auth.sub)
+    .filter((match) => match.status === 'proposed' && match.memberIds[1] === req.auth.sub)
+    .map((match) => ({ id: match.id, from: store.users.get(match.memberIds[0]), compatibility: match.compatibility, score: match.compatibility, createdAt: match.createdAt }));
+  return res.json({ requests });
+});
+
+app.get('/api/v1/chat/requests/sent', requireToken, (req, res, next) => {
+  if (databaseEnabled()) return next('route');
+  const requests = mockMatchesForUser(req.auth.sub)
+    .filter((match) => match.status === 'proposed' && match.memberIds[0] === req.auth.sub)
+    .map((match) => ({ id: match.id, to: store.users.get(match.memberIds[1]), compatibility: match.compatibility, score: match.compatibility, createdAt: match.createdAt }));
+  return res.json({ requests });
+});
+
+app.post('/api/v1/chat/requests/:id/accept', requireToken, (req, res, next) => {
+  if (databaseEnabled()) return next('route');
+  const match = store.matches.get(req.params.id);
+  if (!match || match.memberIds[1] !== req.auth.sub || match.status !== 'proposed') return res.status(404).json({ error: 'REQUEST_NOT_FOUND' });
+  match.status = 'accepted';
+  match.acceptedAt = match.acceptedAt || new Date().toISOString();
+  return res.json({ accepted: true, match });
+});
+
+app.get('/api/v1/chat/rooms', requireToken, (req, res, next) => {
+  if (databaseEnabled()) return next('route');
+  const type = chatSessionType(req.query.type);
+  const rooms = mockMatchesForUser(req.auth.sub)
+    .filter((match) => ['accepted', 'confirmed'].includes(match.status))
+    .filter((match) => type !== 'ROOMMATE' || match.status === 'confirmed')
+    .map((match) => mockChatRoom(match, req.auth.sub, type));
+  return res.json({ rooms });
 });
 
 const allowedConflictCategories = new Set(['noise', 'cleaning', 'guests', 'shared_space', 'sleep_schedule', 'communication', 'other']);
@@ -140,7 +259,7 @@ const recordOutcomeLabel = (input) => saveOutcomeLabel({
   getChatFeatures: getChatFeaturesForMatch,
 });
 
-app.get('/health', (_req, res) => res.json({ ok: true, product: 'CheckMate', mode: redisClient ? 'redis' : 'memory' }));
+app.get('/health', (_req, res) => res.json({ ok: true, product: 'CheckMate', persistence: databaseEnabled() ? 'postgresql' : 'memory', realtime: redisClient ? 'redis' : 'memory' }));
 app.post('/api/v1/auth/login', authLimiter, async (req, res, next) => { try { const user = await authenticateAccount(req.body.accountId, req.body.password); if (!user) return res.status(401).json({ error: 'INVALID_CREDENTIALS' }); return res.json({ accessToken: tokenFor(user), tokenType: 'Bearer', expiresInSeconds: 1800, user: { id: user.id, accountId: user.accountId, pseudonym: user.pseudonym, role: user.role, operatorId: user.operatorId } }); } catch (error) { return next(error); } });
 app.get('/api/v1/users/me', requireToken, async (req, res, next) => { try { if (databaseEnabled()) { const user = await getPrisma().tenant.findUnique({ where: { id: req.auth.sub }, select: { id: true, loginId: true, pseudonym: true, email: true, age: true, gender: true } }); if (!user) return res.status(404).json({ error: 'USER_NOT_FOUND' }); return res.json({ user: { ...user, accountId: user.loginId, gender: user.gender?.toLowerCase() || null } }); } const user = store.users.get(req.auth.sub); if (!user) return res.status(404).json({ error: 'USER_NOT_FOUND' }); return res.json({ user: { ...user } }); } catch (error) { return next(error); } });
 app.patch('/api/v1/users/me', requireToken, async (req, res, next) => { try { if (req.auth.role !== 'tenant') return res.status(403).json({ error: 'TENANT_ROLE_REQUIRED' }); const pseudonym = typeof req.body.pseudonym === 'string' ? req.body.pseudonym.trim().slice(0, 80) : ''; const email = typeof req.body.email === 'string' ? req.body.email.trim().slice(0, 320) : null; const age = req.body.age === '' || req.body.age === null ? null : Number(req.body.age); const gender = req.body.gender || null; if (pseudonym.length < 2 || (email && !/^\S+@\S+\.\S+$/.test(email)) || (age !== null && (!Number.isInteger(age) || age < 18 || age > 100)) || (gender && !allowedGenders.has(gender))) return res.status(400).json({ error: 'INVALID_PROFILE' }); if (databaseEnabled()) { const user = await getPrisma().tenant.update({ where: { id: req.auth.sub }, data: { pseudonym, email, age, gender: gender ? gender.toUpperCase() : null }, select: { id: true, loginId: true, pseudonym: true, email: true, age: true, gender: true } }); return res.json({ user: { ...user, accountId: user.loginId, gender: user.gender?.toLowerCase() || null } }); } const user = store.users.get(req.auth.sub); if (!user) return res.status(404).json({ error: 'USER_NOT_FOUND' }); Object.assign(user, { pseudonym, email, age, gender }); return res.json({ user }); } catch (error) { return next(error); } });
@@ -254,7 +373,7 @@ const checkinScheduler = startCheckinScheduler();
 if (databaseEnabled()) setInterval(async () => { const sessions = await getPrisma().chatSession.findMany({ where: { status: 'ACTIVE', expiresAt: { gt: new Date() }, deletedAt: null } }).catch(() => []); for (const session of sessions) if (!store.chats.has(session.matchId)) store.chats.set(session.matchId, { id: session.id, matchId: session.matchId, expiresAt: session.expiresAt.toISOString(), status: 'active', messages: [] }); }, 1000);
 process.once('SIGTERM', () => checkinScheduler?.stop());
 process.once('SIGINT', () => checkinScheduler?.stop());
-server.listen(PORT, () => console.log(`CheckMate API listening on http://localhost:${PORT} (${process.env.NODE_ENV === 'production' ? 'production' : 'mock'})`));
+server.listen(PORT, () => console.log(`CheckMate API listening on http://localhost:${PORT} (${databaseEnabled() ? 'database' : 'mock'})`));
 
 
 

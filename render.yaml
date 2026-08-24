@@ -3,9 +3,11 @@ services:
     name: checkmate-api
     runtime: node
     plan: starter
-    buildCommand: npm ci
+    buildCommand: npm ci && npx prisma generate --schema prisma/schema.prisma
+    preDeployCommand: npx prisma db push --schema prisma/schema.prisma
     startCommand: npm run server
-    autoDeploy: false
+    initialDeployHook: npm run db:seed
+    autoDeployTrigger: commit
     healthCheckPath: /health
     envVars:
       - key: NODE_VERSION
@@ -15,21 +17,31 @@ services:
       - key: MOCK_MODE
         value: "false"
       - key: PERSISTENCE_READY
-        value: "false"
+        value: "true"
       - key: ENABLE_CRON
         value: "false"
       - key: CLIENT_ORIGIN
-        sync: false
+        value: https://building-sooty.vercel.app
       - key: JWT_SECRET
-        sync: false
+        generateValue: true
       - key: REFRESH_TOKEN_SECRET
-        sync: false
+        generateValue: true
       - key: VERIFICATION_PEPPER
-        sync: false
+        generateValue: true
       - key: DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: checkmate-postgres
+          property: connectionString
       - key: REDIS_URL
-        sync: false
+        fromService:
+          name: checkmate-redis
+          type: keyvalue
+          property: connectionString
+
+  - type: keyvalue
+    name: checkmate-redis
+    plan: starter
+    ipAllowList: []
 
 databases:
   - name: checkmate-postgres

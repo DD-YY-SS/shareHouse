@@ -1,7 +1,152 @@
-import { React, useState, API, responseJson, ChevronLeft, CreditCard, FileCheck2, ShieldCheck, BadgeCheck, Check } from '../shared.js';
+import {
+  React,
+  useEffect,
+  useState,
+  API,
+  responseJson,
+  ChevronLeft,
+  CreditCard,
+  FileCheck2,
+  ShieldCheck,
+  BadgeCheck,
+  Check,
+} from '../shared.js';
 
 export default function Confirm({ roomId, matchId, paymentId, back, done, care }) {
-  const [signed, setSigned] = useState(false), [paid, setPaid] = useState(false), [waiting, setWaiting] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState('');
-  const pay = async () => { setBusy(true); setError(''); try { const auth = JSON.parse(sessionStorage.getItem('cm-auth') || 'null'); const headers = { Authorization: `Bearer ${auth?.accessToken || ''}`, 'Content-Type': 'application/json' }; let currentPaymentId = paymentId; if (!currentPaymentId && matchId) { const hold = await responseJson(await fetch(`${API}/api/v1/matches/${matchId}/preauthorize`, { method: 'POST', headers })); currentPaymentId = hold?.payment?.id || hold?.id; } if (!currentPaymentId) throw new Error('결제 정보를 준비하지 못했습니다. 채팅방에서 다시 시도해 주세요.'); const data = await responseJson(await fetch(`${API}/api/v1/payments/${currentPaymentId}/capture`, { method: 'POST', headers })); if (data.allTenantsPaid) { sessionStorage.setItem('cm-care-start', sessionStorage.getItem('cm-care-start') || new Date().toISOString()); setPaid(true); done(); } else setWaiting(true); } catch (e) { setError(e.message || '결제 처리에 실패했습니다.'); } finally { setBusy(false); } };
-  return <section className="page-pad inner-page confirm-page"><button className="back-button" onClick={back}><ChevronLeft size={19}/>뒤로</button><div className="section-kicker">계약 및 안심 케어</div><h2>함께 지킬 규칙을<br/>확인해 주세요</h2><p className="muted">두 사람 모두 결제를 완료해야 입주와 30일 케어가 시작됩니다.</p><div className="agreement-card"><div className="agreement-head"><FileCheck2 size={20}/><div><strong>생활 협약서</strong><span>안전한 공동생활을 위한 약속입니다.</span></div></div><div className="agreement-rules"><p><Check size={15}/>밤 11시 이후 공용 공간 소음 줄이기</p><p><Check size={15}/>공용 공간 주 1회 이상 청소하기</p><p><Check size={15}/>방문객은 서로에게 미리 알리기</p></div>{signed ? <div className="signed-state"><Check size={17}/>협약서 확인 완료</div> : <button className="secondary-button" onClick={() => setSigned(true)}><FileCheck2 size={17}/>협약서 확인 및 동의</button>}</div><div className="care-hero"><ShieldCheck size={28}/><div><strong>30일 안심 케어</strong><span>운영사의 중재와 룸메이트 교체 지원</span></div><BadgeCheck size={20}/></div><div className="payment-box"><div><span>안심 예약금</span><strong>30,000원</strong></div><p><Check size={15}/>양쪽 모두 10분 안에 결제를 완료해야 합니다.</p></div>{waiting ? <div className="paid-state"><CreditCard size={20}/>내 결제 완료 · 상대방 결제를 기다리는 중입니다.</div> : paid ? <><div className="paid-state"><Check size={20}/>두 사람의 결제가 모두 완료되었습니다.</div><button className="primary-button" onClick={care}><ShieldCheck size={18}/>30일 케어 라운지 입장</button></> : <button className="primary-button" disabled={!signed || busy} onClick={pay}><CreditCard size={18}/>{busy ? '결제 처리 중…' : '결제하고 입주 대기하기'}</button>}{error && <p className="login-error">{error}</p>}</section>;
+  const [signed, setSigned] = useState(false);
+  const [paid, setPaid] = useState(false);
+  const [waiting, setWaiting] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const currentAuth = JSON.parse(sessionStorage.getItem('cm-auth') || 'null');
+  const careKey = `cm-care-start-${currentAuth?.user?.id || ''}`;
+
+  // 결제 페이지에 다시 들어올 때 DB에 저장된 결제 상태를 복원합니다.
+  useEffect(() => {
+    if (!matchId) return undefined;
+
+    let cancelled = false;
+    const auth = JSON.parse(sessionStorage.getItem('cm-auth') || 'null');
+    const headers = { Authorization: `Bearer ${auth?.accessToken || ''}` };
+
+    responseJson(fetch(`${API}/api/v1/matches/${matchId}/payment-status`, { headers }))
+      .then((data) => {
+        if (cancelled) return;
+        if (data.allTenantsPaid) {
+          sessionStorage.setItem(careKey, sessionStorage.getItem(careKey) || new Date().toISOString());
+          setPaid(true);
+          setWaiting(false);
+        } else if (data.currentUserPaid) {
+          setPaid(false);
+          setWaiting(true);
+        } else {
+          setPaid(false);
+          setWaiting(false);
+        }
+      })
+      .catch(() => {
+        // 상태 API가 잠시 실패해도 결제 버튼 자체는 사용할 수 있게 둡니다.
+      });
+
+    return () => { cancelled = true; };
+  }, [matchId, paymentId, careKey]);
+
+  const pay = async () => {
+    setBusy(true);
+    setError('');
+
+    try {
+      const auth = JSON.parse(sessionStorage.getItem('cm-auth') || 'null');
+      const headers = {
+        Authorization: `Bearer ${auth?.accessToken || ''}`,
+        'Content-Type': 'application/json',
+      };
+      let currentPaymentId = paymentId;
+
+      if (!currentPaymentId && matchId) {
+        const hold = await responseJson(await fetch(`${API}/api/v1/matches/${matchId}/preauthorize`, {
+          method: 'POST',
+          headers,
+        }));
+        currentPaymentId = hold?.payment?.id || hold?.id;
+      }
+
+      if (!currentPaymentId) {
+        throw new Error('결제 정보를 준비하지 못했습니다. 채팅방에서 다시 시도해 주세요.');
+      }
+
+      const data = await responseJson(await fetch(`${API}/api/v1/payments/${currentPaymentId}/capture`, {
+        method: 'POST',
+        headers,
+      }));
+
+      if (data.allTenantsPaid) {
+        sessionStorage.setItem(careKey, sessionStorage.getItem(careKey) || new Date().toISOString());
+        setPaid(true);
+        setWaiting(false);
+        done();
+      } else {
+        setPaid(false);
+        setWaiting(true);
+      }
+    } catch (e) {
+      setError(e.message || '결제 처리에 실패했습니다.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="page-pad inner-page confirm-page">
+      <button className="back-button" onClick={back}><ChevronLeft size={19} />뒤로</button>
+      <div className="section-kicker">계약 및 안심 케어</div>
+      <h2>함께 지킬 규칙을<br />확인해 주세요</h2>
+      <p className="muted">두 사람 모두 결제를 완료해야 입주와 30일 케어가 시작됩니다.</p>
+
+      <div className="agreement-card">
+        <div className="agreement-head">
+          <FileCheck2 size={20} />
+          <div><strong>생활 협약서</strong><span>안전한 공동생활을 위한 약속입니다.</span></div>
+        </div>
+        <div className="agreement-rules">
+          <p><Check size={15} />밤 11시 이후 공용 공간 소음 줄이기</p>
+          <p><Check size={15} />공용 공간 주 1회 이상 청소하기</p>
+          <p><Check size={15} />방문객은 서로에게 미리 알리기</p>
+        </div>
+        {signed ? (
+          <div className="signed-state"><Check size={17} />협약서 확인 완료</div>
+        ) : (
+          <button className="secondary-button" onClick={() => setSigned(true)}>
+            <FileCheck2 size={17} />협약서 확인 및 동의
+          </button>
+        )}
+      </div>
+
+      <div className="care-hero">
+        <ShieldCheck size={28} />
+        <div><strong>30일 안심 케어</strong><span>운영사의 중재와 룸메이트 교체 지원</span></div>
+        <BadgeCheck size={20} />
+      </div>
+
+      <div className="payment-box">
+        <div><span>안심 예약금</span><strong>30,000원</strong></div>
+        <p><Check size={15} />양쪽 모두 10분 안에 결제를 완료해야 합니다.</p>
+      </div>
+
+      {waiting ? (
+        <div className="paid-state"><CreditCard size={20} />내 결제 완료 · 상대방 결제를 기다리는 중입니다.</div>
+      ) : paid ? (
+        <>
+          <div className="paid-state"><Check size={20} />두 사람의 결제가 모두 완료되었습니다.</div>
+          <button className="primary-button" onClick={care}><ShieldCheck size={18} />30일 케어 라운지 입장</button>
+        </>
+      ) : (
+        <button className="primary-button" disabled={!signed || busy} onClick={pay}>
+          <CreditCard size={18} />{busy ? '결제 처리 중…' : '결제하고 입주 대기하기'}
+        </button>
+      )}
+
+      {error && <p className="login-error">{error}</p>}
+    </section>
+  );
 }

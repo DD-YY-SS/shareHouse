@@ -9,7 +9,8 @@ const presenceOptions = [
 ];
 
 export default function CarePage({ roomId, matchId, auth, back }) {
-  const [start] = useState(() => sessionStorage.getItem('cm-care-start') || new Date().toISOString());
+  const careKey = `cm-care-start-${auth?.user?.id || ''}`;
+  const [start, setStart] = useState(() => sessionStorage.getItem(careKey) || new Date().toISOString());
   const [now, setNow] = useState(Date.now());
   const [rules, setRules] = useState(false);
   const [sos, setSos] = useState(false);
@@ -26,7 +27,20 @@ export default function CarePage({ roomId, matchId, auth, back }) {
       setPresence(data.statuses || []);
     } catch { setPresence([]); }
   };
-  useEffect(() => { sessionStorage.setItem('cm-care-start', start); const timer = setInterval(() => setNow(Date.now()), 60000); return () => clearInterval(timer); }, [start]);
+  useEffect(() => { sessionStorage.setItem(careKey, start); const timer = setInterval(() => setNow(Date.now()), 60000); return () => clearInterval(timer); }, [careKey, start]);
+  useEffect(() => {
+    if (!matchId || !auth?.accessToken) return undefined;
+    let cancelled = false;
+    responseJson(fetch(`${API}/api/v1/matches/${matchId}/payment-status`, { headers }))
+      .then((data) => {
+        if (cancelled || !data.allTenantsPaid) return;
+        const persisted = sessionStorage.getItem(careKey);
+        const serverStart = data.payment?.paidAt || new Date().toISOString();
+        if (!persisted) setStart(serverStart);
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [matchId, auth?.accessToken, careKey]);
   useEffect(() => { loadPresence(); const timer = setInterval(loadPresence, 30000); return () => clearInterval(timer); }, [matchId, auth?.accessToken]);
 
   const setPresenceStatus = async (status) => {

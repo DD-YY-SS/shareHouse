@@ -22,8 +22,8 @@ function loadRoommates(roommates) {
   } catch { return base; }
 }
 
-export default function HomeLounge({ context = {}, openMatching, roommates }) {
-  const resident = typeof window !== 'undefined' && Boolean(sessionStorage.getItem('cm-care-start'));
+export default function HomeLounge({ context = {}, openMatching, roommates, resident: confirmedResident = false }) {
+  const resident = confirmedResident || (typeof window !== 'undefined' && Boolean(sessionStorage.getItem(`cm-care-start-${JSON.parse(sessionStorage.getItem('cm-auth') || 'null')?.user?.id || ''}`)));
   const [interaction, setInteraction] = React.useState(null);
   const [statusOpen, setStatusOpen] = React.useState(false);
   const [roommateState, setRoommateState] = React.useState(() => loadRoommates(roommates));
