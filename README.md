@@ -90,6 +90,16 @@ Mock API 서버가 시작될 때 테스트 세입자 약 300명과 9개 행동 �
 MOCK_TENANT_COUNT=300
 ```
 
+## 로컬db 초기화 명령어
+npx prisma db push --schema prisma\schema.prisma --force-reset
+set SEED_PASSWORD=1234
+npm run db:seed
+
+## Stop-Process -Id
+(Get-NetTCPConnection -LocalPort 4000 -State Listen).OwningProcess
+
+Stop-Process -Id #####
+
 ## 발표용 실행 모드
 
 ### 듀얼 채팅 모드
