@@ -40,6 +40,7 @@ const agreementConfig = () => ({
   providerTimeoutMs: numberEnv('AGREEMENT_PROVIDER_TIMEOUT_MS', 20000, 3000, 120000),
   retryCount: numberEnv('AGREEMENT_RETRY_COUNT', 2, 0, 4),
   providerRpm: numberEnv('AGREEMENT_PROVIDER_RPM', 15, 1, 120),
+  maxOutputTokens: numberEnv('AGREEMENT_MAX_OUTPUT_TOKENS', 2600, 1000, 6000),
   cacheTtlMs: numberEnv('AGREEMENT_CACHE_TTL_SECONDS', 1800, 0, 86400) * 1000,
 });
 const maxCacheEntries = 500;
@@ -197,7 +198,8 @@ async function callProvider({ provider, apiKey, baseURL, model, transcript }) {
     // json_object가 호환성이 높습니다. 반환값은 로컬 Zod 스키마로 다시 검증합니다.
     const completion = await client.chat.completions.create({
       model,
-      max_tokens: 1800,
+      max_tokens: agreementConfig().maxOutputTokens,
+      temperature: 0.1,
       messages: [{ role: 'system', content: userPrompt }],
       response_format: { type: 'json_object' },
     });
@@ -208,12 +210,42 @@ async function callProvider({ provider, apiKey, baseURL, model, transcript }) {
   const instructor = Instructor({ client, mode: 'TOOLS' });
   const draft = await instructor.chat.completions.create({
     model,
-    max_tokens: 1800,
+    max_tokens: agreementConfig().maxOutputTokens,
     max_retries: 0,
     messages: [{ role: 'system', content: userPrompt }],
     response_model: { schema: agreementDraftSchema, name: 'LivingAgreementDraft' },
   });
   return agreementDraftSchema.parse(draft);
+}
+
+// If the provider is temporarily unavailable, keep the user's conversation
+// useful instead of returning the same generic three-rule placeholder every
+// time. This is deliberately conservative: it only emits categories whose
+// keywords appear in the transcript and always marks them for final review.
+export function fallbackDraftFromTranscript(transcript) {
+  const text = String(transcript || '');
+  const rules = [];
+  const add = (category, content) => rules.push({ category, content, agreedBy: [], needsConfirmation: true });
+  if (/(소음|조용|이어폰|통화|영상|23시|밤 11시|자정)/.test(text)) {
+    add('quiet_hours', '밤 23시 이후에는 공용 공간의 소음을 줄이고, 통화·영상 시청 시 이어폰을 사용해요.');
+  }
+  if (/(청소|정리|설거지|주방|화장실)/.test(text)) {
+    add('cleaning', '공용 공간은 정해진 주기에 맞춰 함께 정리하고, 사용한 식기와 조리도구는 바로 정리해요.');
+  }
+  if (/(방문객|손님|친구|연인|알려|하루 전)/.test(text)) {
+    add('guests', '방문객이 있을 때는 미리 서로에게 알리고, 머무는 시간은 함께 정해요.');
+  }
+  if (/(냉장고|수납|공용 공간|각자 구역|공동 사용)/.test(text)) {
+    add('shared_space', '공용 냉장고와 수납공간은 서로 정한 구역과 사용 규칙을 지켜요.');
+  }
+  if (/(동의|좋아요|합의|정하|그렇게 하|알겠습니다)/.test(text)) {
+    for (const rule of rules) rule.needsConfirmation = true;
+  }
+  return {
+    title: '우리의 생활 협약서 초안',
+    rules: rules.length ? rules.slice(0, 10) : fallbackDraft.rules,
+    unresolvedItems: ['AI 초안과 대화 내용을 양측이 직접 확인한 뒤 최종 동의해 주세요.'],
+  };
 }
 
 export async function draftAgreementFromMessages({ messages, tenantAId, tenantBId, cacheKey = '' }) {
@@ -249,7 +281,8 @@ export async function draftAgreementFromMessages({ messages, tenantAId, tenantBI
 
 export function getAgreementQueueStats() {
   const { maxConcurrency, maxQueue, providerRpm } = agreementConfig();
-  return { active: activeJobs, queued: pendingJobs.length, inFlight: inFlightJobs.size, maxConcurrency, maxQueue, providerRpm };
+  const { maxOutputTokens } = agreementConfig();
+  return { active: activeJobs, queued: pendingJobs.length, inFlight: inFlightJobs.size, maxConcurrency, maxQueue, providerRpm, maxOutputTokens };
 }
 
 export { fallbackDraft };

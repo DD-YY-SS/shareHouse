@@ -27,7 +27,7 @@ import { startCheckinScheduler } from './jobs/checkin-scheduler.js';
 import { databaseEnabled, getPrisma } from './prisma.js';
 import { ConditionLogRepository } from './repositories/condition-log.repository.js';
 import { CheckinRepository } from './repositories/checkin.repository.js';
-import { draftAgreementFromMessages, fallbackDraft, getAgreementQueueStats } from './services/agreement-drafter.js';
+import { draftAgreementFromMessages, fallbackDraft, fallbackDraftFromTranscript, getAgreementQueueStats } from './services/agreement-drafter.js';
 import { Prisma } from '@prisma/client';
 
 assertProductionConfiguration();
@@ -514,7 +514,8 @@ app.post('/api/v1/agreements/draft-from-chat', requireToken, async (req, res, ne
       result = await draftAgreementFromMessages({ messages, tenantAId: match.tenantAId, tenantBId: match.tenantBId, cacheKey: match.id });
     } catch (error) {
       console.error('agreement_draft_llm_failed', error?.message || 'unknown_error');
-      result = { draft: fallbackDraft, source: 'fallback_error' };
+      const fallbackTranscript = messages.map((message) => message?.text || message?.body || '').filter(Boolean).join('\n');
+      result = { draft: fallbackDraftFromTranscript(fallbackTranscript), source: 'fallback_rule_extraction', provider: null };
     }
 
     const rules = { ...result.draft, source: result.source, provider: result.provider || null, rawTranscriptStored: false, generatedAt: new Date().toISOString() };
