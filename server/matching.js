@@ -1,61 +1,129 @@
-// Explainable, non-ML matching. Operators can tune these weights at runtime.
-// The total is intentionally close to 100 so the score is easy to explain in the UI.
-export const DEFAULT_RULES = [
-  { key: 'lateReturnBand', label: '심야 귀가 빈도', weight: 20, maxDistance: 3, enabled: true },
-  { key: 'sleepTimeBand', label: '잠드는 시간대', weight: 15, maxDistance: 3, enabled: true },
-  { key: 'wakeTimeBand', label: '기상 시간대', weight: 10, maxDistance: 3, enabled: true },
-  { key: 'cleaningBand', label: '공용 공간 청소', weight: 15, maxDistance: 3, enabled: true },
-  { key: 'noiseBand', label: '소음·통화 시간', weight: 15, maxDistance: 3, enabled: true },
-  { key: 'deliveryWasteBand', label: '배달 쓰레기 배출', weight: 10, maxDistance: 3, enabled: true },
-  { key: 'guestFrequencyBand', label: '방문객 빈도', weight: 10, maxDistance: 3, enabled: true },
-  { key: 'cookingBand', label: '취사 빈도', weight: 3, maxDistance: 3, enabled: true },
-  { key: 'commonSpaceBand', label: '공용 공간 사용', weight: 2, maxDistance: 3, enabled: true },
+// Explainable rule-based matching.
+// Every survey answer is a 1-5 behavior score. A smaller difference means a
+// closer lifestyle fit; noise and age tolerance use their cross-comparison rules.
+
+const QUESTION_RULES = [
+  ['sleepTimeBand', '평소 잠드는 시간', 'sleep'],
+  ['lateReturnBand', '자정 이후 귀가 빈도', 'sleep'],
+  ['wakeTimeBand', '평소 기상 시간', 'sleep'],
+  ['speakerNoiseBand', '스피커 사용 빈도', 'noise'],
+  ['lateCallBand', '밤 11시 이후 통화 빈도', 'noise'],
+  ['noiseToleranceBand', '허용 가능한 소음 수준', 'noise'],
+  ['commonCleaningBand', '공용공간 청소 횟수', 'cleaning'],
+  ['bathroomCleaningBand', '화장실 청소 횟수', 'cleaning'],
+  ['dishwashingBand', '설거지 처리 속도', 'cleaning'],
+  ['guestFrequencyBand', '손님 초대 빈도', 'community'],
+  ['ageGapToleranceBand', '허용 가능한 나이 차이', 'community'],
+  ['interactionBand', '룸메이트 교류 정도', 'community'],
+  ['cookingBand', '직접 요리 횟수', 'convenience'],
+  ['deliveryBand', '배달 음식 이용 횟수', 'convenience'],
+  ['climateBand', '냉난방 사용 성향', 'convenience'],
 ];
 
-function fitMessage(distance) {
-  if (distance === 0) return '생활 기준이 거의 같아요';
-  if (distance === 1) return '생활 리듬 차이가 작아요';
-  if (distance === 2) return '입주 전 조율이 필요한 항목이에요';
-  return '생활 패턴 차이가 큰 항목이에요';
+export const DEFAULT_RULES = QUESTION_RULES.map(([key, label]) => ({
+  key, label, weight: 6, maxDistance: 4, enabled: true,
+})).concat([
+  { key: 'roomType', label: '주거 형태', weight: 6, maxDistance: 1, enabled: true },
+  { key: 'shareCount', label: '쉐어 인원', weight: 4, maxDistance: 2, enabled: true },
+]);
+
+const DOMAIN_LABELS = {
+  sleep: '수면·생활 시간',
+  noise: '소음',
+  cleaning: '청소·공용공간',
+  community: '방문객·공동생활',
+  convenience: '생활 편의',
+  housing: '주거 형태',
+};
+
+const clamp = (value, min = 0, max = 100) => Math.min(max, Math.max(min, value));
+const average = (values) => values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length) : 0;
+
+function bandValue(profile, key) {
+  const raw = Number(profile?.[key]);
+  if (!Number.isFinite(raw)) return 3;
+  // Profiles saved by the previous UI used zero-based indexes. Keep them
+  // readable while all newly saved profiles use the explicit 1-5 scale.
+  const version = Number(profile?._meta?.surveyVersion || 1);
+  if (version < 2 && raw >= 0 && raw <= 3) return raw + 1;
+  return clamp(Math.round(raw), 1, 5);
+}
+
+function directFit(left, right) {
+  const distance = Math.abs(left - right);
+  return { distance, fitPercent: Math.round(100 - (distance / 4) * 100) };
+}
+
+function noiseFit(generated, tolerated) {
+  const gap = Math.max(0, generated - tolerated);
+  return { distance: gap, fitPercent: clamp(Math.round(100 - gap * 25)) };
+}
+
+function allowedAgeGap(value) {
+  return [0, 2, 4, 6, 100][clamp(value, 1, 5) - 1];
+}
+
+function ageFit(left = {}, right = {}, leftTolerance, rightTolerance) {
+  if (!Number.isInteger(Number(left.age)) || !Number.isInteger(Number(right.age))) return { distance: 0, fitPercent: 80 };
+  const ageGap = Math.abs(Number(left.age) - Number(right.age));
+  const allowed = Math.min(allowedAgeGap(leftTolerance), allowedAgeGap(rightTolerance));
+  return { distance: Math.max(0, ageGap - allowed), fitPercent: clamp(100 - Math.max(0, ageGap - allowed) * 20) };
+}
+
+function fitMessage(fitPercent) {
+  if (fitPercent >= 90) return '생활 기준이 거의 같아요.';
+  if (fitPercent >= 70) return '생활 패턴 차이가 작아요.';
+  if (fitPercent >= 50) return '서로 조율하면 잘 맞을 수 있어요.';
+  return '입주 전에 이 기준을 꼭 대화해 보세요.';
 }
 
 export function scoreCompatibility(left = {}, right = {}, rules = DEFAULT_RULES) {
-  const activeRules = rules.filter((rule) => rule.enabled);
-  const behaviorBreakdown = activeRules.map((rule) => {
-    const leftValue = Number.isInteger(left[rule.key]) ? left[rule.key] : 1;
-    const rightValue = Number.isInteger(right[rule.key]) ? right[rule.key] : 1;
-    const distance = Math.abs(leftValue - rightValue);
-    const fit = Math.max(0, 1 - distance / Math.max(1, rule.maxDistance));
-    return { key: rule.key, label: rule.label, weight: rule.weight, distance, matched: distance <= 1, fitPercent: Math.round(fit * 100), contribution: Math.round(fit * rule.weight), message: fitMessage(distance) };
-  });
+  const enabled = new Map(rules.filter((rule) => rule.enabled !== false).map((rule) => [rule.key, rule]));
+  const items = [];
+  const addItem = (key, label, domain, fit, weight = enabled.get(key)?.weight ?? 6) => {
+    items.push({ key, label, domain, weight, distance: fit.distance, fitPercent: fit.fitPercent, matched: fit.fitPercent >= 75, contribution: Math.round(fit.fitPercent * weight / 100), message: fitMessage(fit.fitPercent) });
+  };
 
-  // Housing compatibility is part of the explainable score, not just a UI filter.
-  // A room type mismatch is a hard lifestyle difference; a share-count difference
-  // is softer because a nearby room configuration may still work.
-  const roomTypeDistance = left.roomType && right.roomType && left.roomType !== right.roomType ? 2 : 0;
-  const leftShareCount = Number(left.shareCount) || 2;
-  const rightShareCount = Number(right.shareCount) || 2;
-  const shareCountDistance = Math.abs(leftShareCount - rightShareCount);
-  const housingBreakdown = [
-    { key: 'roomType', label: '주거 형태', weight: 10, distance: roomTypeDistance, matched: roomTypeDistance === 0, fitPercent: roomTypeDistance === 0 ? 100 : 0, contribution: roomTypeDistance === 0 ? 10 : 0, message: roomTypeDistance === 0 ? '선택한 주거 형태가 같아요.' : '선택한 주거 형태가 달라요.' },
-    { key: 'shareCount', label: '쉐어 인원', weight: 8, distance: shareCountDistance, matched: shareCountDistance <= 1, fitPercent: Math.max(0, 100 - shareCountDistance * 35), contribution: Math.round(Math.max(0, 1 - shareCountDistance * .35) * 8), message: shareCountDistance === 0 ? '함께 살고 싶은 인원 수가 같아요.' : '희망 쉐어 인원에 차이가 있어요.' },
-  ];
-  const breakdown = [...behaviorBreakdown, ...housingBreakdown];
-  const totalWeight = breakdown.reduce((sum, item) => sum + item.weight, 0);
-  const score = totalWeight ? Math.round((breakdown.reduce((sum, item) => sum + item.contribution, 0) / totalWeight) * 100) : 0;
-  const bestReasons = [...breakdown].sort((a, b) => b.contribution - a.contribution || a.distance - b.distance).slice(0, 3);
-  const watchouts = breakdown.filter((item) => item.distance >= 2 || item.fitPercent < 50).sort((a, b) => b.weight - a.weight).slice(0, 2);
-  return { score, breakdown, bestReasons, watchouts, matchedCount: breakdown.filter((item) => item.matched).length, totalRules: breakdown.length };
+  for (const [key, label, domain] of QUESTION_RULES) {
+    if (domain === 'noise' || (domain === 'community' && key === 'ageGapToleranceBand')) continue;
+    addItem(key, label, domain, directFit(bandValue(left, key), bandValue(right, key)));
+  }
+
+  const leftNoiseTolerance = bandValue(left, 'noiseToleranceBand');
+  const rightNoiseTolerance = bandValue(right, 'noiseToleranceBand');
+  const speakerFit = noiseFit(bandValue(left, 'speakerNoiseBand'), rightNoiseTolerance);
+  const reverseSpeakerFit = noiseFit(bandValue(right, 'speakerNoiseBand'), leftNoiseTolerance);
+  const callFit = noiseFit(bandValue(left, 'lateCallBand'), rightNoiseTolerance);
+  const reverseCallFit = noiseFit(bandValue(right, 'lateCallBand'), leftNoiseTolerance);
+  addItem('speakerNoiseBand', '스피커 소음 교차 적합도', 'noise', { distance: average([speakerFit.distance, reverseSpeakerFit.distance]), fitPercent: average([speakerFit.fitPercent, reverseSpeakerFit.fitPercent]) });
+  addItem('lateCallBand', '늦은 시간 통화 교차 적합도', 'noise', { distance: average([callFit.distance, reverseCallFit.distance]), fitPercent: average([callFit.fitPercent, reverseCallFit.fitPercent]) });
+  addItem('noiseToleranceBand', '소음 허용 기준 교차 적합도', 'noise', { distance: average([speakerFit.distance, reverseSpeakerFit.distance, callFit.distance, reverseCallFit.distance]), fitPercent: average([speakerFit.fitPercent, reverseSpeakerFit.fitPercent, callFit.fitPercent, reverseCallFit.fitPercent]) });
+
+  const ageCompatibility = ageFit(left, right, bandValue(left, 'ageGapToleranceBand'), bandValue(right, 'ageGapToleranceBand'));
+  addItem('ageGapToleranceBand', '나이 차이 허용 범위', 'community', ageCompatibility);
+
+  const roomTypeFit = left.roomType && right.roomType && left.roomType !== right.roomType ? { distance: 1, fitPercent: 0 } : { distance: 0, fitPercent: 100 };
+  const shareCountFit = directFit(Number(left.shareCount) || 2, Number(right.shareCount) || 2);
+  addItem('roomType', '주거 형태', 'housing', roomTypeFit, enabled.get('roomType')?.weight ?? 6);
+  addItem('shareCount', '쉐어 인원', 'housing', shareCountFit, enabled.get('shareCount')?.weight ?? 4);
+
+  const domainWeights = { sleep: 18, noise: 18, cleaning: 18, community: 18, convenience: 18, housing: 10 };
+  const domainBreakdown = Object.entries(domainWeights).map(([key, weight]) => {
+    const domainItems = items.filter((item) => item.domain === key);
+    const score = average(domainItems.map((item) => item.fitPercent));
+    return { key, label: DOMAIN_LABELS[key], score, weight, matched: score >= 75, message: fitMessage(score), itemCount: domainItems.length };
+  });
+  const totalWeight = domainBreakdown.reduce((sum, domain) => sum + domain.weight, 0);
+  const score = Math.round(domainBreakdown.reduce((sum, domain) => sum + domain.score * domain.weight, 0) / totalWeight);
+  const bestReasons = [...items].sort((a, b) => b.fitPercent - a.fitPercent || b.weight - a.weight).slice(0, 3);
+  const watchouts = [...items].filter((item) => item.fitPercent < 60).sort((a, b) => b.weight - a.weight).slice(0, 3);
+  const totalDistance = 100 - score;
+  return { score, totalDistance, distance: totalDistance, breakdown: items, domainBreakdown, bestReasons, watchouts, matchedCount: items.filter((item) => item.matched).length, totalRules: items.length };
 }
 
 export function rankCandidates(ownProfile, users, profiles, rules) {
   return users
-    .map((user) => ({
-      candidateId: user.id,
-      pseudonym: '익명 입주 예정자',
-      verification: { identity: 'passed', affiliation: 'passed' },
-      ...scoreCompatibility(ownProfile, profiles.get(user.id), rules),
-    }))
-    .sort((left, right) => right.score - left.score || right.matchedCount - left.matchedCount || left.candidateId.localeCompare(right.candidateId))
+    .map((user) => ({ candidateId: user.id, pseudonym: '익명 입주 예정자', verification: { identity: 'passed', affiliation: 'passed' }, ...scoreCompatibility(ownProfile, profiles.get(user.id), rules) }))
+    .sort((left, right) => left.totalDistance - right.totalDistance || right.score - left.score || left.candidateId.localeCompare(right.candidateId))
     .map((candidate, index) => ({ ...candidate, rank: index + 1 }));
 }

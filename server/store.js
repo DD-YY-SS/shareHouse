@@ -7,7 +7,7 @@ const tenantOne = { id: '00000000-0000-4000-8000-000000000001', accountId: 'tena
 const tenantTwo = { id: '00000000-0000-4000-8000-000000000002', accountId: 'tenant2', pseudonym: '세입자 2', age: 31, gender: 'female', role: 'tenant', createdAt: now() };
 const operator = { id: '00000000-0000-4000-8000-000000000010', accountId: 'operatorA', pseudonym: '오브리빙 운영자', role: 'operator', operatorId: 'operator-a', createdAt: now() };
 [tenantOne, tenantTwo, operator].forEach((user) => store.users.set(user.id, user));
-const defaultProfile = { lateReturnBand: 1, sleepTimeBand: 1, wakeTimeBand: 1, deliveryWasteBand: 1, cleaningBand: 1, noiseBand: 1, guestFrequencyBand: 1, cookingBand: 1, commonSpaceBand: 1 };
+const defaultProfile = { sleepTimeBand: 3, lateReturnBand: 3, wakeTimeBand: 3, speakerNoiseBand: 3, lateCallBand: 3, noiseToleranceBand: 3, commonCleaningBand: 3, bathroomCleaningBand: 3, dishwashingBand: 3, guestFrequencyBand: 3, ageGapToleranceBand: 3, interactionBand: 3, cookingBand: 3, deliveryBand: 3, climateBand: 3, roomType: 'private_room', shareCount: 2, _meta: { variant: 'standard', surveyVersion: 2 } };
 store.profiles.set(tenantOne.id, { ...defaultProfile });
 store.profiles.set(tenantTwo.id, { ...defaultProfile, guestFrequencyBand: 2, cookingBand: 2 });
 
@@ -17,7 +17,7 @@ const namedTestTenants = [];
 for (let index = 3; index <= 30; index += 1) {
   const suffix = String(index).padStart(12, '0');
   const user = { id: `00000000-0000-4000-8000-${suffix}`, accountId: `tenant${index}`, pseudonym: `테스트 세입자 ${index}`, age: 22 + ((index * 3) % 13), gender: 'female', role: 'tenant', createdAt: now() };
-  const profile = { ...defaultProfile, lateReturnBand: index % 4, sleepTimeBand: (index + 1) % 4, wakeTimeBand: (index + 2) % 4, roomType: index % 3 === 0 ? 'shared_room' : 'private_room', shareCount: index % 3 === 0 ? 2 : 1, preferredGender: 'any', ageBand: 'any', _meta: { variant: 'standard' } };
+  const profile = { ...defaultProfile, lateReturnBand: (index % 5) + 1, sleepTimeBand: ((index + 1) % 5) + 1, wakeTimeBand: ((index + 2) % 5) + 1, speakerNoiseBand: ((index + 3) % 5) + 1, lateCallBand: ((index + 4) % 5) + 1, commonCleaningBand: ((index + 1) % 5) + 1, guestFrequencyBand: ((index + 2) % 5) + 1, roomType: index % 3 === 0 ? 'shared_room' : 'private_room', shareCount: index % 3 === 0 ? 2 : 3, preferredGender: 'any', ageBand: 'any', _meta: { variant: 'standard', surveyVersion: 2 } };
   store.users.set(user.id, user);
   store.profiles.set(user.id, profile);
   store.profileCompletedAt.set(user.id, now());
@@ -34,7 +34,11 @@ const genderOptions = ['female', 'male', 'non_binary', 'prefer_not_to_say'];
 for (let index = 1; index <= mockTenantCount; index += 1) {
   const suffix = String(index).padStart(3, '0');
   const user = { id: randomUUID(), accountId: `mock_tenant_${suffix}`, pseudonym: `테스트 입주자 ${suffix}`, age: 20 + ((index * 7) % 16), gender: genderOptions[index % genderOptions.length], role: 'tenant', createdAt: now() };
-  const profile = Object.fromEntries(profileKeys.map((key, keyIndex) => [key, (index * 17 + keyIndex * 7) % 4]));
+  const profile = { ...defaultProfile };
+  const behaviorKeys = profileKeys.filter((key) => key.endsWith('Band'));
+  behaviorKeys.forEach((key, keyIndex) => { profile[key] = ((index * 17 + keyIndex * 7) % 5) + 1; });
+  profile.roomType = index % 3 === 0 ? 'shared_room' : 'private_room';
+  profile.shareCount = index % 3 === 0 ? 2 : 3;
   store.users.set(user.id, user);
   store.profiles.set(user.id, profile);
   mockTenants.push(user);
