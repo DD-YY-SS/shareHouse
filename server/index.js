@@ -107,7 +107,8 @@ const matchesVariant = (ownAnswers, candidateAnswers, variant) => {
   if (variant === 'nearby') {
     if (own.variant !== 'nearby' || candidate.variant !== 'nearby') return false;
     if (![own, candidate].every((item) => finiteCoordinate(item.latitude) && finiteCoordinate(item.longitude))) return false;
-    return distanceKm(own, candidate) <= 1;
+    const radiusKm = Number(process.env.NEARBY_MATCH_RADIUS_KM || 1);
+    return distanceKm(own, candidate) <= (Number.isFinite(radiusKm) && radiusKm > 0 ? radiusKm : 1);
   }
   return false;
 };
