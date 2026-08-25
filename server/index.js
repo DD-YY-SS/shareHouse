@@ -772,6 +772,7 @@ app.post('/api/v1/live-demo/care-report/reveal', async (_req, res, next) => {
   try {
     // ESP32의 물리 버튼이 수집 종료와 최종 JSON 전송을 담당합니다.
     // 파일을 먼저 읽은 뒤 수신기를 종료해야 마지막 블루투스 데이터가 유실되지 않습니다.
+    if (!store.liveDemo.careReport && process.env.NODE_ENV === 'production') return res.status(409).json({ error: 'CARE_REPORT_UPLOAD_REQUIRED' });
     const report = store.liveDemo.careReport || await readCareReport();
     if (!report.samples.length) return res.status(409).json({ error: 'CARE_REPORT_EMPTY' });
     await stopEsp32Receiver();
