@@ -640,6 +640,10 @@ async function readCareReport() {
   const filePath = esp32ResultsPath();
   const raw = await fs.readFile(filePath, 'utf8');
   const parsed = JSON.parse(raw);
+  return normalizeCareReport(parsed, path.relative(process.cwd(), filePath).replaceAll('\\', '/'));
+}
+
+function normalizeCareReport(parsed, source = 'uploaded:sharehouse_results.json') {
   if (!Array.isArray(parsed)) throw new Error('ESP32_RESULTS_FORMAT_INVALID');
   const samples = parsed.filter((item) => item && typeof item === 'object').map((item, index) => ({
     id: index + 1,
@@ -651,7 +655,7 @@ async function readCareReport() {
   const latest = samples.at(-1) || null;
   const average = (key) => samples.length ? Math.round(samples.reduce((sum, item) => sum + item[key], 0) / samples.length * 10) / 10 : 0;
   return {
-    source: path.relative(process.cwd(), filePath).replaceAll('\\', '/'),
+    source,
     collectedAt: new Date().toISOString(),
     totalSamples: samples.length,
     averageNoiseCount: average('noiseCount'),
@@ -746,12 +750,29 @@ app.post('/api/v1/live-demo/care-report/start', async (_req, res, next) => {
     return res.json(liveDemoState());
   } catch (error) { return next(error); }
 });
+app.post('/api/v1/live-demo/care-report/upload', async (req, res, next) => {
+  if (!store.liveDemo.careReportDemoStarted) return res.status(409).json({ error: 'CARE_REPORT_DEMO_NOT_STARTED' });
+  try {
+    const payload = Array.isArray(req.body) ? req.body : req.body?.samples;
+    if (!Array.isArray(payload)) return res.status(400).json({ error: 'CARE_REPORT_SAMPLES_REQUIRED' });
+    if (payload.length > 1000) return res.status(413).json({ error: 'CARE_REPORT_TOO_LARGE' });
+    const report = normalizeCareReport(payload, 'uploaded:sharehouse_results.json');
+    if (!report.samples.length) return res.status(422).json({ error: 'CARE_REPORT_EMPTY' });
+    store.liveDemo.careReport = report;
+    store.liveDemo.careReportReceiver = 'uploaded';
+    store.liveDemo.careReportReceiverError = null;
+    return res.json({ ...liveDemoState(), uploaded: true });
+  } catch (error) {
+    if (error instanceof SyntaxError) return res.status(422).json({ error: 'CARE_REPORT_JSON_INVALID' });
+    return next(error);
+  }
+});
 app.post('/api/v1/live-demo/care-report/reveal', async (_req, res, next) => {
   if (!store.liveDemo.careReportDemoStarted) return res.status(409).json({ error: 'CARE_REPORT_DEMO_NOT_STARTED' });
   try {
     // ESP32의 물리 버튼이 수집 종료와 최종 JSON 전송을 담당합니다.
     // 파일을 먼저 읽은 뒤 수신기를 종료해야 마지막 블루투스 데이터가 유실되지 않습니다.
-    const report = await readCareReport();
+    const report = store.liveDemo.careReport || await readCareReport();
     if (!report.samples.length) return res.status(409).json({ error: 'CARE_REPORT_EMPTY' });
     await stopEsp32Receiver();
     store.liveDemo.careReport = report;
