@@ -4,9 +4,9 @@ import { z } from 'zod';
 
 export const apiLimiter = rateLimit({
   windowMs: 60_000,
-  // ChatInbox polls four lightweight endpoints. 120/min was too low when
-  // several demo accounts were opened from the same machine/IP.
-  limit: 300,
+  // 인증 토큰별 제한입니다. 라이브 시연에서 여러 계정이 동시에
+  // 채팅 목록을 갱신해도 정상 동작하도록 넉넉하게 둡니다.
+  limit: 600,
   standardHeaders: 'draft-8',
   legacyHeaders: false,
   keyGenerator: (req) => {
@@ -22,18 +22,41 @@ export const apiLimiter = rateLimit({
 
 export const liveDemoLimiter = rateLimit({
   windowMs: 60_000,
-  limit: 3000,
+  // 참가자 30명 기준 heartbeat/state polling을 충분히 수용하되,
+  // 무제한 공개 API가 되지 않도록 별도 제한을 둡니다.
+  limit: 6000,
   standardHeaders: 'draft-8',
   legacyHeaders: false,
   message: { error: 'LIVE_DEMO_RATE_LIMITED', retryAfterSeconds: 60 },
 });
 
-export const authLimiter = rateLimit({
-  windowMs: 15 * 60_000,
-  limit: 10,
+export const agreementLimiter = rateLimit({
+  windowMs: 60_000,
+  // 협약서 생성은 전용 대기열에서 다시 제어합니다. 이 제한은 중복 클릭과
+  // 악성 반복 요청만 차단하고, 사용자별 정상 재시도는 허용합니다.
+  limit: 30,
   standardHeaders: 'draft-8',
   legacyHeaders: false,
-  // Mock mode is local/demo-only; production keeps the 10-attempt limiter.
+  keyGenerator: (req) => {
+    const authorization = req.get('authorization');
+    if (authorization) return `token:${crypto.createHash('sha256').update(authorization).digest('hex')}`;
+    return `ip:${ipKeyGenerator(req.ip)}`;
+  },
+  message: { error: 'AGREEMENT_RATE_LIMITED', retryAfterSeconds: 60 },
+});
+
+export const authLimiter = rateLimit({
+  windowMs: 15 * 60_000,
+  limit: 12,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  // 행사장에서는 30명이 같은 공인 IP를 공유할 수 있습니다. IP만 키로
+  // 사용하면 정상 참가자 11명부터 차단되므로 계정별로 제한합니다.
+  keyGenerator: (req) => {
+    const accountId = String(req.body?.accountId || '').trim().toLowerCase();
+    return accountId ? `login-account:${accountId}` : `login-ip:${ipKeyGenerator(req.ip)}`;
+  },
+  // Mock mode is local/demo-only; production keeps the account-level limiter.
   skip: (req) => process.env.MOCK_MODE === 'true' || (process.env.NODE_ENV !== 'production' && /^tenant(?:[1-9]|[12]\d|30)$/.test(req.body?.accountId || '')),
   message: { error: 'AUTH_RATE_LIMITED' },
 });

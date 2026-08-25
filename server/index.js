@@ -14,7 +14,7 @@ import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import { rankCandidates, scoreCompatibility } from './matching.js';
 import { createId, registerDevelopmentAccount, store } from './store.js';
-import { apiLimiter, authLimiter, globalErrorHandler, liveDemoLimiter } from './security.js';
+import { agreementLimiter, apiLimiter, authLimiter, globalErrorHandler, liveDemoLimiter } from './security.js';
 import { httpLogger, requestId } from './observability.js';
 import { authenticateAccount, hashPassword, secureAuthRouter } from './auth.js';
 import { assertProductionConfiguration } from './production.js';
@@ -24,11 +24,16 @@ import { startCheckinScheduler } from './jobs/checkin-scheduler.js';
 import { databaseEnabled, getPrisma } from './prisma.js';
 import { ConditionLogRepository } from './repositories/condition-log.repository.js';
 import { CheckinRepository } from './repositories/checkin.repository.js';
-import { draftAgreementFromMessages, fallbackDraft } from './services/agreement-drafter.js';
+import { draftAgreementFromMessages, fallbackDraft, getAgreementQueueStats } from './services/agreement-drafter.js';
 import { Prisma } from '@prisma/client';
 
 assertProductionConfiguration();
 const app = express(); const server = http.createServer(app); const PORT = Number(process.env.PORT || 4000); const JWT_SECRET = process.env.JWT_SECRET || 'development-only-change-before-production'; const PEPPER = process.env.VERIFICATION_PEPPER || 'development-only-pepper';
+// 협약서 대기열이 30명 시연에서 정상적으로 마무리될 수 있도록 요청 제한을
+// 짧게 끊지 않되, 헤더만 보내고 연결을 점유하는 요청은 빠르게 종료합니다.
+server.requestTimeout = Number(process.env.HTTP_REQUEST_TIMEOUT_MS || 240000);
+server.headersTimeout = Number(process.env.HTTP_HEADERS_TIMEOUT_MS || 15000);
+server.keepAliveTimeout = Number(process.env.HTTP_KEEPALIVE_TIMEOUT_MS || 65000);
 // Render terminates the public connection at a single trusted reverse proxy.
 // Trusting that one hop lets express-rate-limit use the real client IP from
 // X-Forwarded-For without treating the proxy header as an attack.
@@ -115,7 +120,7 @@ app.use(helmet()); app.use(requestId); app.use(httpLogger); app.use(cors(corsOpt
 // Authenticated API responses contain user-specific state. Never let a 304
 // response make the client treat an empty body as an empty chat list.
 app.use('/api/v1', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
-app.use('/api/v1', apiLimiter); app.use('/api/v1/live-demo', liveDemoLimiter); app.use('/api/v1/funnel/events', liveDemoLimiter); app.use('/api/v1/live-demo/match', (req, res, next) => { if (process.env.LIVE_DEMO_REDIS_REQUIRED !== 'false' && !redisClient?.isReady) return res.status(503).json({ error: 'LIVE_REDIS_REQUIRED', message: '라이브 채팅은 Redis 연결 후 사용할 수 있습니다.' }); return next(); }); app.use('/api/v1/auth/secure', secureAuthRouter());
+app.use('/api/v1', apiLimiter); app.use('/api/v1/live-demo', liveDemoLimiter); app.use('/api/v1/funnel/events', liveDemoLimiter); app.use('/api/v1/agreements', agreementLimiter); app.use('/api/v1/live-demo/match', (req, res, next) => { if (process.env.LIVE_DEMO_REDIS_REQUIRED !== 'false' && !redisClient?.isReady) return res.status(503).json({ error: 'LIVE_REDIS_REQUIRED', message: '라이브 채팅은 Redis 연결 후 사용할 수 있습니다.' }); return next(); }); app.use('/api/v1/auth/secure', secureAuthRouter());
 const digest = (value) => crypto.createHmac('sha256', PEPPER).update(value).digest('hex');
 const tokenFor = (user) => jwt.sign({ sub: user.id, role: user.role, operatorId: user.operatorId, jti: createId() }, JWT_SECRET, { issuer: 'checkmate', expiresIn: '30m' });
 function requireToken(req, res, next) { const token = req.headers.authorization?.replace('Bearer ', ''); if (!token) return res.status(401).json({ error: 'UNAUTHORIZED' }); try { req.auth = jwt.verify(token, JWT_SECRET, { issuer: 'checkmate' }); return next(); } catch { return res.status(401).json({ error: 'TOKEN_INVALID_OR_EXPIRED' }); } }
@@ -446,6 +451,7 @@ app.post('/api/v1/agreements/draft-from-chat', requireToken, async (req, res, ne
     const matchId = String(req.body?.matchId || '');
     const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
     if (!matchId || messages.length === 0) return res.status(400).json({ error: 'CHAT_MESSAGES_REQUIRED' });
+    if (messages.length > 100) return res.status(413).json({ error: 'CHAT_MESSAGES_TOO_LARGE', maxMessages: 100 });
     console.log('agreement_draft_started', { matchId, messageCount: messages.length });
 
     const prisma = getPrisma();
@@ -461,7 +467,7 @@ app.post('/api/v1/agreements/draft-from-chat', requireToken, async (req, res, ne
 
     let result;
     try {
-      result = await draftAgreementFromMessages({ messages, tenantAId: match.tenantAId, tenantBId: match.tenantBId });
+      result = await draftAgreementFromMessages({ messages, tenantAId: match.tenantAId, tenantBId: match.tenantBId, cacheKey: match.id });
     } catch (error) {
       console.error('agreement_draft_llm_failed', error?.message || 'unknown_error');
       result = { draft: fallbackDraft, source: 'fallback_error' };
@@ -559,7 +565,7 @@ const recordOutcomeLabel = (input) => saveOutcomeLabel({
   getChatFeatures: getChatFeaturesForMatch,
 });
 
-app.get('/health', (_req, res) => res.json({ ok: true, product: 'CheckMate', persistence: databaseEnabled() ? 'postgresql' : 'memory', realtime: redisClient?.isReady ? 'redis' : 'memory', liveChat: process.env.LIVE_DEMO_REDIS_REQUIRED !== 'false' ? (redisClient?.isReady ? 'redis-required' : 'redis-unavailable') : (redisClient?.isReady ? 'redis' : 'memory-fallback') }));
+app.get('/health', (_req, res) => res.json({ ok: true, product: 'CheckMate', persistence: databaseEnabled() ? 'postgresql' : 'memory', realtime: redisClient?.isReady ? 'redis' : 'memory', liveChat: process.env.LIVE_DEMO_REDIS_REQUIRED !== 'false' ? (redisClient?.isReady ? 'redis-required' : 'redis-unavailable') : (redisClient?.isReady ? 'redis' : 'memory-fallback'), agreementQueue: getAgreementQueueStats() }));
 app.post('/api/v1/auth/login', authLimiter, async (req, res, next) => { try { const user = await authenticateAccount(req.body.accountId, req.body.password); if (!user) return res.status(401).json({ error: 'INVALID_CREDENTIALS' }); return res.json({ accessToken: tokenFor(user), tokenType: 'Bearer', expiresInSeconds: 1800, variant: requestVariant(req), user: { id: user.id, accountId: user.accountId, pseudonym: user.pseudonym, role: user.role, operatorId: user.operatorId } }); } catch (error) { return next(error); } });
 app.post('/api/v1/auth/register', authLimiter, async (req, res, next) => { try { const accountId = typeof req.body?.accountId === 'string' ? req.body.accountId.trim() : ''; const password = typeof req.body?.password === 'string' ? req.body.password : ''; const pseudonym = typeof req.body?.pseudonym === 'string' ? req.body.pseudonym.trim().slice(0, 80) : ''; const age = Number(req.body?.age); const gender = typeof req.body?.gender === 'string' ? req.body.gender : 'prefer_not_to_say'; if (!/^[A-Za-z0-9_-]{4,40}$/.test(accountId) || password.length < 4 || pseudonym.length < 2 || !Number.isInteger(age) || age < 18 || age > 100 || !allowedGenders.has(gender)) return res.status(400).json({ error: 'INVALID_SIGNUP_INPUT' }); if (!databaseEnabled()) { const user = registerDevelopmentAccount({ accountId, password, pseudonym, age, gender }); if (!user) return res.status(409).json({ error: 'ACCOUNT_ID_TAKEN' }); return res.status(201).json({ accessToken: tokenFor(user), tokenType: 'Bearer', expiresInSeconds: 1800, user: { id: user.id, accountId: user.accountId, pseudonym: user.pseudonym, age: user.age, gender: user.gender, role: user.role } }); } const prisma = getPrisma(); const exists = await prisma.account.findUnique({ where: { loginId: accountId } }); if (exists) return res.status(409).json({ error: 'ACCOUNT_ID_TAKEN' }); const tenant = await prisma.$transaction(async (tx) => { const createdTenant = await tx.tenant.create({ data: { loginId: accountId, pseudonym, age, gender: gender.toUpperCase() } }); await tx.account.create({ data: { loginId: accountId, passwordHash: hashPassword(password), role: 'TENANT', tenantId: createdTenant.id } }); return createdTenant; }); const user = { id: tenant.id, accountId: tenant.loginId, pseudonym: tenant.pseudonym, age: tenant.age, gender: gender.toLowerCase(), role: 'tenant' }; return res.status(201).json({ accessToken: tokenFor(user), tokenType: 'Bearer', expiresInSeconds: 1800, user }); } catch (error) { if (error?.code === 'P2002') return res.status(409).json({ error: 'ACCOUNT_ID_TAKEN' }); return next(error); } });
 app.get('/api/v1/users/me', requireToken, async (req, res, next) => { try { if (databaseEnabled()) { const user = await getPrisma().tenant.findUnique({ where: { id: req.auth.sub }, select: { id: true, loginId: true, pseudonym: true, email: true, age: true, gender: true, mbti: true, profilePhotoData: true } }); if (!user) return res.status(404).json({ error: 'USER_NOT_FOUND' }); return res.json({ user: { ...user, accountId: user.loginId, gender: user.gender?.toLowerCase() || null, mbti: user.mbti || null } }); } const user = store.users.get(req.auth.sub); if (!user) return res.status(404).json({ error: 'USER_NOT_FOUND' }); return res.json({ user: { ...user } }); } catch (error) { return next(error); } });
@@ -718,7 +724,19 @@ cron.schedule('* * * * *', async () => { for (const chat of store.chats.values()
 cron.schedule('0 9 * * *', () => { for (const checkin of store.checkins.values()) if (checkin.status === 'scheduled' && Date.parse(checkin.dueAt) <= Date.now()) { checkin.status = 'sent'; checkin.sentAt = new Date().toISOString(); store.notifications.push({ type: 'CHECKIN_DUE', channel: 'push_webhook_mock', action: 'send_feedback_request', checkpoint: checkin.checkpoint, contractId: checkin.contractId, createdAt: checkin.sentAt }); } });
 app.use(async (error, req, res, next) => { const duplicateMatch = error?.code === 'P2002' && req.method === 'POST' && req.path === '/api/v1/matches' && databaseEnabled() && req.auth?.sub && req.body?.candidateId; if (!duplicateMatch) console.error('request_failed', error); if (duplicateMatch) { const existing = await getPrisma().match.findFirst({ where: { OR: [{ tenantAId: req.auth.sub, tenantBId: req.body.candidateId }, { tenantAId: req.body.candidateId, tenantBId: req.auth.sub }], deletedAt: null }, select: { id: true, tenantAId: true, tenantBId: true, status: true, compatibilityScore: true, scoreBreakdown: true } }).catch(() => null); if (existing) return res.status(200).json({ match: { id: existing.id, memberIds: [existing.tenantAId, existing.tenantBId], status: existing.status.toLowerCase(), compatibility: existing.compatibilityScore, breakdown: existing.scoreBreakdown }, reused: true }); } return globalErrorHandler(error, req, res, next); });
 const checkinScheduler = startCheckinScheduler();
-if (databaseEnabled()) setInterval(async () => { const sessions = await getPrisma().chatSession.findMany({ where: { status: 'ACTIVE', expiresAt: { gt: new Date() }, deletedAt: null } }).catch(() => []); for (const session of sessions) if (!store.chats.has(session.matchId)) store.chats.set(session.matchId, { id: session.id, matchId: session.matchId, expiresAt: session.expiresAt.toISOString(), status: 'active', messages: [] }); }, 1000);
+let sessionHydrationRunning = false;
+if (databaseEnabled()) setInterval(async () => {
+  if (sessionHydrationRunning) return;
+  sessionHydrationRunning = true;
+  try {
+    const sessions = await getPrisma().chatSession.findMany({ where: { status: 'ACTIVE', expiresAt: { gt: new Date() }, deletedAt: null } }).catch(() => []);
+    for (const session of sessions) {
+      if (!store.chats.has(session.matchId)) store.chats.set(session.matchId, { id: session.id, matchId: session.matchId, expiresAt: session.expiresAt.toISOString(), status: 'active', messages: [] });
+    }
+  } finally {
+    sessionHydrationRunning = false;
+  }
+}, 10000);
 process.once('SIGTERM', () => checkinScheduler?.stop());
 process.once('SIGINT', () => checkinScheduler?.stop());
 server.listen(PORT, () => console.log(`CheckMate API listening on http://localhost:${PORT} (${databaseEnabled() ? 'database' : 'mock'})`));
