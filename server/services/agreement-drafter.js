@@ -1,5 +1,6 @@
 import Instructor from '@instructor-ai/instructor';
 import OpenAI from 'openai';
+import { zodResponseFormat } from 'openai/helpers/zod';
 import crypto from 'node:crypto';
 import { z } from 'zod';
 
@@ -40,7 +41,8 @@ const agreementConfig = () => ({
   providerTimeoutMs: numberEnv('AGREEMENT_PROVIDER_TIMEOUT_MS', 20000, 3000, 120000),
   retryCount: numberEnv('AGREEMENT_RETRY_COUNT', 2, 0, 4),
   providerRpm: numberEnv('AGREEMENT_PROVIDER_RPM', 15, 1, 120),
-  maxOutputTokens: numberEnv('AGREEMENT_MAX_OUTPUT_TOKENS', 2600, 1000, 6000),
+  // Keep the pre-queue default so long conversations do not produce truncated JSON.
+  maxOutputTokens: numberEnv('AGREEMENT_MAX_OUTPUT_TOKENS', 6000, 1000, 6000),
   cacheTtlMs: numberEnv('AGREEMENT_CACHE_TTL_SECONDS', 1800, 0, 86400) * 1000,
 });
 const maxCacheEntries = 500;
@@ -194,17 +196,45 @@ async function callProvider({ provider, apiKey, baseURL, model, transcript }) {
   const userPrompt = promptFor(transcript);
 
   if (provider === 'gemini') {
-    // Gemini OpenAI 호환 API에서는 zodResponseFormat(JSON Schema)보다
-    // json_object가 호환성이 높습니다. 반환값은 로컬 Zod 스키마로 다시 검증합니다.
-    const completion = await client.chat.completions.create({
-      model,
-      max_tokens: agreementConfig().maxOutputTokens,
-      temperature: 0.1,
-      messages: [{ role: 'system', content: userPrompt }],
-      response_format: { type: 'json_object' },
-    });
-    const raw = completion.choices?.[0]?.message?.content;
-    return agreementDraftSchema.parse(parseJsonContent(raw));
+    // Prefer the structured-output path that worked before the agreement queue
+    // was introduced. Gemini can truncate free-form JSON on longer transcripts.
+    try {
+      const completion = await client.beta.chat.completions.parse({
+        model,
+        max_tokens: agreementConfig().maxOutputTokens,
+        reasoning_effort: 'none',
+        messages: [
+          {
+            role: 'system',
+            content: [
+              '당신은 셰어하우스 생활 협약서 초안 작성 도우미입니다.',
+              '대화에서 양측이 명시적으로 합의한 생활 규칙만 추출하세요.',
+              '한 사람의 제안, 추측, 감정 표현은 합의로 표시하지 마세요.',
+              '합의 여부가 불명확하면 agreedBy를 빈 배열로 두고 needsConfirmation을 true로 설정하세요.',
+              '전화번호, 이메일, 외부 링크 등 개인정보는 결과에 포함하지 마세요.',
+              '법률 자문이나 법적 효력을 주장하지 말고, 반드시 양측 최종 확인이 필요한 초안으로 작성하세요.',
+            ].join('\n'),
+          },
+          { role: 'user', content: `다음 익명 대화를 협약서 초안 JSON으로 변환하세요.\n\n${transcript}` },
+        ],
+        response_format: zodResponseFormat(agreementDraftSchema, 'LivingAgreementDraft'),
+      });
+      const parsed = completion.choices?.[0]?.message?.parsed;
+      return agreementDraftSchema.parse(parsed);
+    } catch (structuredError) {
+      // Some Gemini-compatible accounts reject JSON schema. Retry once with
+      // the compatible JSON-object format before using the local fallback.
+      console.warn('agreement_gemini_structured_failed', structuredError?.message || structuredError);
+      const completion = await client.chat.completions.create({
+        model,
+        max_tokens: agreementConfig().maxOutputTokens,
+        temperature: 0.1,
+        messages: [{ role: 'system', content: userPrompt }],
+        response_format: { type: 'json_object' },
+      });
+      const raw = completion.choices?.[0]?.message?.content;
+      return agreementDraftSchema.parse(parseJsonContent(raw));
+    }
   }
 
   const instructor = Instructor({ client, mode: 'TOOLS' });
