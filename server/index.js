@@ -111,14 +111,25 @@ async function ensureLiveDemoRoom(prisma) {
     });
   }
 
-  return prisma.room.create({
-    data: {
-      operatorId: operator.id,
-      externalRoomId: 'LIVE-DEMO-101',
-      name: 'CheckMate 라이브 시연 공간',
-      status: 'VACANT',
-    },
-  });
+  try {
+    return await prisma.room.create({
+      data: {
+        operatorId: operator.id,
+        externalRoomId: 'LIVE-DEMO-101',
+        name: 'CheckMate 라이브 시연 공간',
+        status: 'VACANT',
+      },
+    });
+  } catch (error) {
+    // Several participants may open chat at the same time. If another
+    // request won the unique insert race, reuse the room it just created.
+    if (error?.code !== 'P2002') throw error;
+    const raced = await prisma.room.findFirst({
+      where: { operatorId: operator.id, externalRoomId: 'LIVE-DEMO-101', deletedAt: null },
+    });
+    if (raced) return raced;
+    throw error;
+  }
 }
 const scorePayload = (result) => ({ items: result.breakdown, domains: result.domainBreakdown, totalDistance: result.totalDistance });
 const unpackScorePayload = (value) => Array.isArray(value) ? { items: value, domains: [] } : { items: value?.items || [], domains: value?.domains || [], totalDistance: value?.totalDistance ?? null };
