@@ -11,7 +11,15 @@ export default function LiveDemo() {
   const [controlError, setControlError] = useState('');
   const [qrOpen, setQrOpen] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState('');
-  const participantUrl = `${window.location.origin}/?demo=live`;
+  const [liveSessionId] = useState(() => {
+    const storageKey = 'checkmate-live-session-id';
+    const saved = window.sessionStorage.getItem(storageKey);
+    if (saved) return saved;
+    const created = window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    window.sessionStorage.setItem(storageKey, created);
+    return created;
+  });
+  const participantUrl = `${window.location.origin}/?demo=live&session=${encodeURIComponent(liveSessionId)}`;
 
   useEffect(() => {
     QRCode.toDataURL(participantUrl, {
@@ -34,8 +42,15 @@ export default function LiveDemo() {
     };
     qrTrigger.addEventListener('click', open);
     qrTrigger.addEventListener('keydown', onKeyDown);
-    return () => { qrTrigger.removeEventListener('click', open); qrTrigger.removeEventListener('keydown', onKeyDown); };
-  }, []);
+    qrTrigger.style.backgroundImage = qrDataUrl ? `url("${qrDataUrl}")` : '';
+    qrTrigger.classList.toggle('has-qr', Boolean(qrDataUrl));
+    return () => {
+      qrTrigger.removeEventListener('click', open);
+      qrTrigger.removeEventListener('keydown', onKeyDown);
+      qrTrigger.style.backgroundImage = '';
+      qrTrigger.classList.remove('has-qr');
+    };
+  }, [qrDataUrl]);
 
   const load = async () => {
     try {
