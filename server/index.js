@@ -3,6 +3,9 @@ dotenv.config({ path: '.env.local', override: true });
 dotenv.config();
 import crypto from 'node:crypto';
 import http from 'node:http';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
 import express from 'express';
 import cors from 'cors';
 import jwt from 'jsonwebtoken';
@@ -582,7 +585,88 @@ app.patch('/api/v1/care/checkins/:checkinId/answer', requireToken, requireDataba
 // Embedded B2B attribution: retained by operator and room, never by raw personal identifiers.
 app.post('/api/v1/payments/:id/capture', requireToken, async (req, res, next) => { if (!databaseEnabled()) return next('route'); try { const prisma = getPrisma(); const payment = await prisma.payment.findUnique({ where: { id: req.params.id }, include: { match: true } }); if (!payment || !payment.match || ![payment.match.tenantAId, payment.match.tenantBId].includes(req.auth.sub)) return res.status(404).json({ error: 'PAYMENT_NOT_FOUND' }); const paidTenantIds = [...new Set([...(payment.paidTenantIds || []), req.auth.sub])]; const complete = paidTenantIds.includes(payment.match.tenantAId) && paidTenantIds.includes(payment.match.tenantBId); const updated = await prisma.payment.update({ where: { id: payment.id }, data: { paidTenantIds, status: complete ? 'PAID' : 'READY', paidAt: complete ? new Date() : null } }); return res.json({ payment: updated, allTenantsPaid: complete, waitingForOtherTenant: !complete, deadlineMinutes: 10 }); } catch (error) { return next(error); } });
 app.post('/api/v1/funnel/events', (req, res) => { const { operatorId, roomId, funnelId, step, metadata } = req.body; if (!operatorId || !roomId || !funnelId || !step) return res.status(400).json({ error: 'ATTRIBUTION_FIELDS_REQUIRED' }); const safeMetadata = metadata && typeof metadata === 'object' ? { tenantId: typeof metadata.tenantId === 'string' ? metadata.tenantId.slice(0, 80) : null, pseudonym: typeof metadata.pseudonym === 'string' ? metadata.pseudonym.slice(0, 80) : null, variant: typeof metadata.variant === 'string' ? metadata.variant.slice(0, 20) : null, mbti: typeof metadata.mbti === 'string' ? metadata.mbti.slice(0, 8) : null, age: Number.isInteger(Number(metadata.age)) ? Number(metadata.age) : null } : {}; const event = { id: createId(), operatorId, roomId, funnelId, tenantId: safeMetadata.tenantId, metadata: safeMetadata, step, createdAt: new Date().toISOString() }; store.funnelEvents.push(event); res.status(201).json({ event }); });
-const liveDemoState = () => { const events = store.funnelEvents; const unique = (step) => new Set(events.filter((item) => item.step === step && item.tenantId).map((item) => item.tenantId)); const activeSince = Date.now() - 15000; const participants = new Set(events.filter((item) => item.step === 'participant_heartbeat' && item.tenantId && Date.parse(item.createdAt) >= activeSince).map((item) => item.tenantId)); const recentParticipants = []; const seenParticipantIds = new Set(); [...events].filter((item) => item.step === 'participant_joined' && item.metadata?.pseudonym).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).forEach((item) => { if (recentParticipants.length >= 30 || seenParticipantIds.has(item.tenantId)) return; seenParticipantIds.add(item.tenantId); recentParticipants.push({ id: item.tenantId, pseudonym: item.metadata.pseudonym, variant: item.metadata.variant, createdAt: item.createdAt }); }); return { target: Math.max(1, Number(process.env.LIVE_DEMO_TARGET || 30)), participants: participants.size, surveyCompleted: unique('survey_completed').size, matched: unique('match_completed').size, recentParticipants, bestCouple: store.liveDemo.bestCouple, bestCoupleRevealed: store.liveDemo.bestCoupleRevealed, lastActivityAt: events.at(-1)?.createdAt || null, matchRevealed: store.liveDemo.matchRevealed, chatEnabled: store.liveDemo.chatEnabled, revealedAt: store.liveDemo.revealedAt, chatEnabledAt: store.liveDemo.chatEnabledAt }; };
+
+let esp32ReceiverProcess = null;
+const esp32ResultsPath = () => path.resolve(process.cwd(), process.env.ESP32_RESULTS_PATH || 'esp32/sharehouse_results.json');
+const esp32ReceiverPath = () => path.resolve(process.cwd(), process.env.ESP32_RECEIVER_PATH || 'esp32/sharehouse_receiver.py');
+
+function numberOrZero(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+async function readCareReport() {
+  const filePath = esp32ResultsPath();
+  const raw = await fs.readFile(filePath, 'utf8');
+  const parsed = JSON.parse(raw);
+  if (!Array.isArray(parsed)) throw new Error('ESP32_RESULTS_FORMAT_INVALID');
+  const samples = parsed.filter((item) => item && typeof item === 'object').map((item, index) => ({
+    id: index + 1,
+    noiseCount: numberOrZero(item.noise_count ?? item.noiseCount),
+    cleanCount: numberOrZero(item.clean_count ?? item.cleanCount),
+    score: numberOrZero(item.score),
+    savedAt: typeof item.saved_at === 'string' ? item.saved_at : item.savedAt || null,
+  }));
+  const latest = samples.at(-1) || null;
+  const average = (key) => samples.length ? Math.round(samples.reduce((sum, item) => sum + item[key], 0) / samples.length * 10) / 10 : 0;
+  return {
+    source: path.relative(process.cwd(), filePath).replaceAll('\\', '/'),
+    collectedAt: new Date().toISOString(),
+    totalSamples: samples.length,
+    averageNoiseCount: average('noiseCount'),
+    averageCleanCount: average('cleanCount'),
+    averageScore: average('score'),
+    latest,
+    samples: samples.slice(-30),
+  };
+}
+
+function startEsp32Receiver() {
+  if (esp32ReceiverProcess && !esp32ReceiverProcess.killed) return 'already_running';
+  const receiverEnabled = String(process.env.ESP32_RECEIVER_ENABLED || '').toLowerCase() === 'true'
+    || (process.env.NODE_ENV !== 'production' && String(process.env.ESP32_RECEIVER_ENABLED || '').toLowerCase() !== 'false');
+  if (!receiverEnabled) {
+    store.liveDemo.careReportReceiver = 'file_only';
+    return 'file_only';
+  }
+  const python = process.env.ESP32_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
+  const scriptPath = esp32ReceiverPath();
+  const receiver = spawn(python, [scriptPath], {
+    cwd: path.dirname(scriptPath),
+    env: { ...process.env, ESP32_RESULTS_PATH: esp32ResultsPath(), ESP32_PORT: process.env.ESP32_PORT || 'COM4' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  esp32ReceiverProcess = receiver;
+  store.liveDemo.careReportReceiver = 'starting';
+  store.liveDemo.careReportReceiverError = null;
+  receiver.stdout?.on('data', (chunk) => console.log('[ESP32]', String(chunk).trim()));
+  receiver.stderr?.on('data', (chunk) => console.warn('[ESP32]', String(chunk).trim()));
+  receiver.once('error', (error) => {
+    store.liveDemo.careReportReceiver = 'error';
+    store.liveDemo.careReportReceiverError = error.message;
+    esp32ReceiverProcess = null;
+  });
+  receiver.once('exit', (code) => {
+    if (esp32ReceiverProcess === receiver) esp32ReceiverProcess = null;
+    if (store.liveDemo.careReportReceiver !== 'error') store.liveDemo.careReportReceiver = code === 0 ? 'stopped' : 'stopped_with_error';
+  });
+  return 'starting';
+}
+
+async function stopEsp32Receiver() {
+  const receiver = esp32ReceiverProcess;
+  if (!receiver || receiver.killed) return;
+  await new Promise((resolve) => {
+    const done = () => resolve();
+    receiver.once('exit', done);
+    receiver.kill();
+    setTimeout(done, 1500);
+  });
+  esp32ReceiverProcess = null;
+}
+
+const liveDemoState = () => { const events = store.funnelEvents; const unique = (step) => new Set(events.filter((item) => item.step === step && item.tenantId).map((item) => item.tenantId)); const activeSince = Date.now() - 15000; const participants = new Set(events.filter((item) => item.step === 'participant_heartbeat' && item.tenantId && Date.parse(item.createdAt) >= activeSince).map((item) => item.tenantId)); const recentParticipants = []; const seenParticipantIds = new Set(); [...events].filter((item) => item.step === 'participant_joined' && item.metadata?.pseudonym).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).forEach((item) => { if (recentParticipants.length >= 30 || seenParticipantIds.has(item.tenantId)) return; seenParticipantIds.add(item.tenantId); recentParticipants.push({ id: item.tenantId, pseudonym: item.metadata.pseudonym, variant: item.metadata.variant, createdAt: item.createdAt }); }); return { target: Math.max(1, Number(process.env.LIVE_DEMO_TARGET || 30)), participants: participants.size, surveyCompleted: unique('survey_completed').size, matched: unique('match_completed').size, recentParticipants, bestCouple: store.liveDemo.bestCouple, bestCoupleRevealed: store.liveDemo.bestCoupleRevealed, lastActivityAt: events.at(-1)?.createdAt || null, matchRevealed: store.liveDemo.matchRevealed, chatEnabled: store.liveDemo.chatEnabled, revealedAt: store.liveDemo.revealedAt, chatEnabledAt: store.liveDemo.chatEnabledAt, careReportDemoStarted: store.liveDemo.careReportDemoStarted, careReportRevealed: store.liveDemo.careReportRevealed, careReportStartedAt: store.liveDemo.careReportStartedAt, careReportRevealedAt: store.liveDemo.careReportRevealedAt, careReport: store.liveDemo.careReport, careReportReceiver: store.liveDemo.careReportReceiver, careReportReceiverError: store.liveDemo.careReportReceiverError }; };
 
 async function buildLiveBestCouple() {
   const ids = [...new Set(store.funnelEvents.filter((item) => item.step === 'survey_completed' && item.tenantId).map((item) => item.tenantId))];
@@ -609,7 +693,38 @@ app.get('/api/v1/live-demo/state', (_req, res) => res.json(liveDemoState()));
 app.post('/api/v1/live-demo/matching/reveal', (_req, res) => { store.liveDemo.matchRevealed = true; store.liveDemo.revealedAt = new Date().toISOString(); return res.json(liveDemoState()); });
 app.post('/api/v1/live-demo/chat/activate', (_req, res) => { if (!store.liveDemo.matchRevealed) return res.status(409).json({ error: 'MATCHING_RESULT_REQUIRED' }); store.liveDemo.chatEnabled = true; store.liveDemo.chatEnabledAt = new Date().toISOString(); res.json(liveDemoState()); });
 app.post('/api/v1/live-demo/best-couple/reveal', async (_req, res, next) => { if (!store.liveDemo.chatEnabled) return res.status(409).json({ error: 'LIVE_CHAT_REQUIRED' }); try { store.liveDemo.bestCouple = await buildLiveBestCouple(); if (!store.liveDemo.bestCouple) return res.status(409).json({ error: 'BEST_COUPLE_NOT_READY' }); store.liveDemo.bestCoupleRevealed = true; return res.json(liveDemoState()); } catch (error) { return next(error); } });
-app.post('/api/v1/live-demo/reset', (_req, res) => { store.liveDemo.matchRevealed = false; store.liveDemo.chatEnabled = false; store.liveDemo.bestCoupleRevealed = false; store.liveDemo.bestCouple = null; store.liveDemo.revealedAt = null; store.liveDemo.chatEnabledAt = null; store.funnelEvents = store.funnelEvents.filter((item) => !['participant_joined', 'participant_heartbeat', 'survey_completed', 'match_completed'].includes(item.step)); res.json(liveDemoState()); });
+app.post('/api/v1/live-demo/care-report/start', async (_req, res, next) => {
+  if (!store.liveDemo.bestCoupleRevealed) return res.status(409).json({ error: 'BEST_COUPLE_REQUIRED' });
+  try {
+    store.liveDemo.careReportDemoStarted = true;
+    store.liveDemo.careReportStartedAt = new Date().toISOString();
+    store.liveDemo.careReportRevealed = false;
+    store.liveDemo.careReportRevealedAt = null;
+    store.liveDemo.careReport = null;
+    startEsp32Receiver();
+    return res.json(liveDemoState());
+  } catch (error) { return next(error); }
+});
+app.post('/api/v1/live-demo/care-report/reveal', async (_req, res, next) => {
+  if (!store.liveDemo.careReportDemoStarted) return res.status(409).json({ error: 'CARE_REPORT_DEMO_NOT_STARTED' });
+  try {
+    // ESP32의 물리 버튼이 수집 종료와 최종 JSON 전송을 담당합니다.
+    // 파일을 먼저 읽은 뒤 수신기를 종료해야 마지막 블루투스 데이터가 유실되지 않습니다.
+    const report = await readCareReport();
+    if (!report.samples.length) return res.status(409).json({ error: 'CARE_REPORT_EMPTY' });
+    await stopEsp32Receiver();
+    store.liveDemo.careReport = report;
+    store.liveDemo.careReportRevealed = true;
+    store.liveDemo.careReportRevealedAt = new Date().toISOString();
+    store.liveDemo.careReportReceiver = 'completed';
+    return res.json(liveDemoState());
+  } catch (error) {
+    if (error?.code === 'ENOENT') return res.status(404).json({ error: 'CARE_REPORT_FILE_NOT_FOUND', path: path.relative(process.cwd(), esp32ResultsPath()) });
+    if (error instanceof SyntaxError) return res.status(422).json({ error: 'CARE_REPORT_JSON_INVALID' });
+    return next(error);
+  }
+});
+app.post('/api/v1/live-demo/reset', async (_req, res, next) => { try { await stopEsp32Receiver(); store.liveDemo.matchRevealed = false; store.liveDemo.chatEnabled = false; store.liveDemo.bestCoupleRevealed = false; store.liveDemo.bestCouple = null; store.liveDemo.revealedAt = null; store.liveDemo.chatEnabledAt = null; store.liveDemo.careReportDemoStarted = false; store.liveDemo.careReportRevealed = false; store.liveDemo.careReportStartedAt = null; store.liveDemo.careReportRevealedAt = null; store.liveDemo.careReport = null; store.liveDemo.careReportReceiver = 'idle'; store.liveDemo.careReportReceiverError = null; store.funnelEvents = store.funnelEvents.filter((item) => !['participant_joined', 'participant_heartbeat', 'survey_completed', 'match_completed'].includes(item.step)); res.json(liveDemoState()); } catch (error) { return next(error); } });
 app.post('/api/v1/live-demo/match', requireToken, async (req, res, next) => { if (!store.liveDemo.chatEnabled) return res.status(409).json({ error: 'LIVE_CHAT_NOT_ENABLED' }); try { const candidateId = req.body?.candidateId; if (databaseEnabled()) { const prisma = getPrisma(); const candidate = await prisma.tenant.findUnique({ where: { id: candidateId }, include: { behaviorProfile: true } }); const own = await prisma.behaviorProfile.findUnique({ where: { tenantId: req.auth.sub } }); if (!candidate?.behaviorProfile || !own?.completedAt) return res.status(400).json({ error: 'PROFILE_REQUIRED' }); const existing = await prisma.match.findFirst({ where: { OR: [{ tenantAId: req.auth.sub }, { tenantBId: req.auth.sub }], status: { in: ['ACCEPTED', 'CONFIRMED'] }, deletedAt: null }, orderBy: { updatedAt: 'desc' } }); if (existing) return res.json({ match: { id: existing.id, memberIds: [existing.tenantAId, existing.tenantBId], status: existing.status.toLowerCase(), compatibility: existing.compatibilityScore, breakdown: existing.scoreBreakdown }, reused: true }); let room = await prisma.room.findFirst({ where: { status: 'VACANT', deletedAt: null } }); if (!room) room = await prisma.room.findFirst({ where: { deletedAt: null }, orderBy: { updatedAt: 'asc' } }); if (!room) return res.status(409).json({ error: 'NO_ROOM_FOR_LIVE_DEMO' }); const result = scoreCompatibility(own.answers, candidate.behaviorProfile.answers, store.rules); const match = await prisma.match.create({ data: { tenantAId: req.auth.sub, tenantBId: candidateId, roomId: room.id, compatibilityScore: result.score, scoreBreakdown: result.breakdown, status: 'ACCEPTED', acceptedAt: new Date() } }); return res.status(201).json({ match: { id: match.id, memberIds: [match.tenantAId, match.tenantBId], status: 'accepted', compatibility: match.compatibilityScore, breakdown: match.scoreBreakdown } }); } const candidate = store.users.get(candidateId); const own = store.profiles.get(req.auth.sub); const other = store.profiles.get(candidateId); if (!candidate || candidate.role !== 'tenant' || !own || !other) return res.status(400).json({ error: 'PROFILE_REQUIRED' }); const existing = [...store.matches.values()].find((item) => item.memberIds.includes(req.auth.sub) && item.memberIds.includes(candidateId) && ['accepted', 'confirmed'].includes(item.status)); if (existing) return res.json({ match: existing, reused: true }); const result = scoreCompatibility(own, other, store.rules); const nowIso = new Date().toISOString(); const match = { id: createId(), memberIds: [req.auth.sub, candidateId], compatibility: result.score, score: result.score, breakdown: result.breakdown, bestReasons: result.bestReasons, watchouts: result.watchouts, status: 'accepted', acceptedAt: nowIso, createdAt: nowIso }; store.matches.set(match.id, match); return res.status(201).json({ match }); } catch (error) { return next(error); } });
 app.post('/api/v1/consents', requireToken, (req, res) => { if (!req.body.agreed) return res.status(400).json({ error: 'CONSENT_REQUIRED' }); const consent = { userId: req.auth.sub, version: '2026-08', agreedAt: new Date().toISOString(), evidenceDigest: digest(`${req.auth.sub}:${req.body.operatorId}:${Date.now()}`) }; store.consents.set(req.auth.sub, consent); res.status(201).json({ consent: { version: consent.version, agreedAt: consent.agreedAt } }); });
 
@@ -737,8 +852,8 @@ if (databaseEnabled()) setInterval(async () => {
     sessionHydrationRunning = false;
   }
 }, 10000);
-process.once('SIGTERM', () => checkinScheduler?.stop());
-process.once('SIGINT', () => checkinScheduler?.stop());
+process.once('SIGTERM', () => { checkinScheduler?.stop(); void stopEsp32Receiver(); });
+process.once('SIGINT', () => { checkinScheduler?.stop(); void stopEsp32Receiver(); });
 server.listen(PORT, () => console.log(`CheckMate API listening on http://localhost:${PORT} (${databaseEnabled() ? 'database' : 'mock'})`));
 
 
