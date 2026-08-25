@@ -1,6 +1,6 @@
 import { React, useEffect, useRef, useState, API, io, ChevronLeft, CreditCard, FileCheck2, LockKeyhole, Send, ShieldCheck, ArrowRight } from '../shared.js';
 
-export default function Chat({ auth, chat, type = 'PRE_MOVE', back, confirm, onAgreementDraft }) {
+export default function Chat({ auth, chat, type = 'PRE_MOVE', back, confirm, onAgreementDraft, presentationMode = false }) {
   const roommateChat = type === 'ROOMMATE';
   const careStarted = Boolean(sessionStorage.getItem(`cm-care-start-${auth?.user?.id || ''}`));
   const [remaining, setRemaining] = useState(() => roommateChat ? null : (chat ? Math.max(0, Math.floor((Date.parse(chat.expiresAt) - Date.now()) / 1000)) : 1800));

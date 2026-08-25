@@ -1,12 +1,31 @@
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+import crypto from 'node:crypto';
 import { z } from 'zod';
 
 export const apiLimiter = rateLimit({
   windowMs: 60_000,
-  limit: 120,
+  // ChatInbox polls four lightweight endpoints. 120/min was too low when
+  // several demo accounts were opened from the same machine/IP.
+  limit: 300,
   standardHeaders: 'draft-8',
   legacyHeaders: false,
+  keyGenerator: (req) => {
+    const authorization = req.get('authorization');
+    if (authorization) return `token:${crypto.createHash('sha256').update(authorization).digest('hex')}`;
+    return `ip:${ipKeyGenerator(req.ip)}`;
+  },
+  // The live presentation has one state poll and one heartbeat per
+  // participant. It uses the dedicated liveDemoLimiter below instead.
+  skip: (req) => req.path.startsWith('/live-demo') || req.path === '/funnel/events',
   message: { error: 'RATE_LIMITED', retryAfterSeconds: 60 },
+});
+
+export const liveDemoLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: 3000,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { error: 'LIVE_DEMO_RATE_LIMITED', retryAfterSeconds: 60 },
 });
 
 export const authLimiter = rateLimit({
@@ -15,7 +34,7 @@ export const authLimiter = rateLimit({
   standardHeaders: 'draft-8',
   legacyHeaders: false,
   // Mock mode is local/demo-only; production keeps the 10-attempt limiter.
-  skip: (req) => process.env.MOCK_MODE === 'true' || (process.env.NODE_ENV !== 'production' && ['tenant1', 'tenant2'].includes(req.body?.accountId)),
+  skip: (req) => process.env.MOCK_MODE === 'true' || (process.env.NODE_ENV !== 'production' && /^tenant(?:[1-9]|[12]\d|30)$/.test(req.body?.accountId || '')),
   message: { error: 'AUTH_RATE_LIMITED' },
 });
 

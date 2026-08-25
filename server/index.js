@@ -13,10 +13,10 @@ import { createClient } from 'redis';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import { rankCandidates, scoreCompatibility } from './matching.js';
-import { createId, store } from './store.js';
-import { apiLimiter, authLimiter, globalErrorHandler } from './security.js';
+import { createId, registerDevelopmentAccount, store } from './store.js';
+import { apiLimiter, authLimiter, globalErrorHandler, liveDemoLimiter } from './security.js';
 import { httpLogger, requestId } from './observability.js';
-import { authenticateAccount, secureAuthRouter } from './auth.js';
+import { authenticateAccount, hashPassword, secureAuthRouter } from './auth.js';
 import { assertProductionConfiguration } from './production.js';
 import { maskContactInfo } from './services/contact-guard.js';
 import { recordOutcomeLabel as saveOutcomeLabel } from './services/feedback-labeling.js';
@@ -25,6 +25,7 @@ import { databaseEnabled, getPrisma } from './prisma.js';
 import { ConditionLogRepository } from './repositories/condition-log.repository.js';
 import { CheckinRepository } from './repositories/checkin.repository.js';
 import { draftAgreementFromMessages, fallbackDraft } from './services/agreement-drafter.js';
+import { Prisma } from '@prisma/client';
 
 assertProductionConfiguration();
 const app = express(); const server = http.createServer(app); const PORT = Number(process.env.PORT || 4000); const JWT_SECRET = process.env.JWT_SECRET || 'development-only-change-before-production'; const PEPPER = process.env.VERIFICATION_PEPPER || 'development-only-pepper';
@@ -41,6 +42,44 @@ const corsOptions = {
   credentials: true,
 };
 globalThis.__checkmateStore = store;
+
+async function createOrReuseDatabaseMatch({ prisma, requesterId, candidateId, ownAnswers, candidateAnswers }) {
+  return prisma.$transaction(async (tx) => {
+    // Both users take the same deterministic advisory locks. This prevents two
+    // simultaneous requests from creating two active matches for the same user.
+    for (const userId of [requesterId, candidateId].sort()) {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${userId}, 0))`;
+    }
+
+    const existingPair = await tx.match.findFirst({
+      where: {
+        OR: [{ tenantAId: requesterId, tenantBId: candidateId }, { tenantAId: candidateId, tenantBId: requesterId }],
+        status: { in: ['REQUESTED', 'ACCEPTED', 'CONFIRMED'] },
+        deletedAt: null,
+      },
+      orderBy: { updatedAt: 'desc' },
+    });
+    if (existingPair) {
+      if (existingPair.tenantAId === candidateId && existingPair.tenantBId === requesterId && existingPair.status === 'REQUESTED') {
+        const accepted = await tx.match.update({ where: { id: existingPair.id }, data: { status: 'ACCEPTED', acceptedAt: new Date() } });
+        return { match: accepted, reused: true, mutual: true };
+      }
+      return { match: existingPair, reused: true, mutual: existingPair.status !== 'REQUESTED' };
+    }
+
+    const existingForUser = await tx.match.findFirst({
+      where: { OR: [{ tenantAId: requesterId }, { tenantBId: requesterId }], status: { in: ['REQUESTED', 'ACCEPTED', 'CONFIRMED'] }, deletedAt: null },
+      orderBy: { updatedAt: 'desc' },
+    });
+    if (existingForUser) return { conflict: true, match: existingForUser };
+
+    const room = await tx.room.findFirst({ where: { status: 'VACANT', deletedAt: null }, orderBy: { updatedAt: 'asc' } });
+    if (!room) return { noRoom: true };
+    const result = scoreCompatibility(ownAnswers, candidateAnswers, store.rules);
+    const match = await tx.match.create({ data: { tenantAId: requesterId, tenantBId: candidateId, roomId: room.id, compatibilityScore: result.score, scoreBreakdown: result.breakdown, status: 'REQUESTED' } });
+    return { match, reused: false, mutual: false };
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, maxWait: 5000, timeout: 10000 });
+}
 const io = new Server(server, { cors: { origin: [...allowedOrigins], credentials: true } });
 let redisClient = null;
 if (process.env.REDIS_URL) {
@@ -70,11 +109,11 @@ if (process.env.REDIS_URL) {
     console.warn('Redis is unavailable; using in-memory chat fallback. Start Redis to enable shared real-time delivery.');
   }
 }
-app.use(helmet()); app.use(requestId); app.use(httpLogger); app.use(cors(corsOptions)); app.use(cookieParser()); app.use(express.json({ limit: '32kb' }));
+app.use(helmet()); app.use(requestId); app.use(httpLogger); app.use(cors(corsOptions)); app.use(cookieParser()); app.use(express.json({ limit: '160kb' }));
 // Authenticated API responses contain user-specific state. Never let a 304
 // response make the client treat an empty body as an empty chat list.
 app.use('/api/v1', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
-app.use('/api/v1', apiLimiter); app.use('/api/v1/auth/secure', secureAuthRouter());
+app.use('/api/v1', apiLimiter); app.use('/api/v1/live-demo', liveDemoLimiter); app.use('/api/v1/funnel/events', liveDemoLimiter); app.use('/api/v1/live-demo/match', (req, res, next) => { if (process.env.LIVE_DEMO_REDIS_REQUIRED !== 'false' && !redisClient?.isReady) return res.status(503).json({ error: 'LIVE_REDIS_REQUIRED', message: '라이브 채팅은 Redis 연결 후 사용할 수 있습니다.' }); return next(); }); app.use('/api/v1/auth/secure', secureAuthRouter());
 const digest = (value) => crypto.createHmac('sha256', PEPPER).update(value).digest('hex');
 const tokenFor = (user) => jwt.sign({ sub: user.id, role: user.role, operatorId: user.operatorId, jti: createId() }, JWT_SECRET, { issuer: 'checkmate', expiresIn: '30m' });
 function requireToken(req, res, next) { const token = req.headers.authorization?.replace('Bearer ', ''); if (!token) return res.status(401).json({ error: 'UNAUTHORIZED' }); try { req.auth = jwt.verify(token, JWT_SECRET, { issuer: 'checkmate' }); return next(); } catch { return res.status(401).json({ error: 'TOKEN_INVALID_OR_EXPIRED' }); } }
@@ -135,6 +174,46 @@ const chatSessionType = (value) => value === 'ROOMMATE' ? 'ROOMMATE' : 'PRE_MOVE
 const chatRoomName = (type, matchId) => `chat:${type === 'ROOMMATE' ? 'roommate' : 'pre-move'}:${matchId}`;
 const chatMessageKey = (type, matchId) => `${chatRoomName(type, matchId)}:messages`;
 const chatMetaKey = (type, matchId) => `${chatRoomName(type, matchId)}:meta`;
+// This route is intentionally registered before the generic live-match route
+// below. The candidate selected by the explainable ranking endpoint is passed
+// through unchanged, so the live chat uses the same top recommendation shown
+// on the result screen.
+app.post('/api/v1/live-demo/match', requireToken, async (req, res, next) => {
+  if (!store.liveDemo.chatEnabled) return res.status(409).json({ error: 'LIVE_CHAT_NOT_ENABLED' });
+  if (process.env.LIVE_DEMO_REDIS_REQUIRED !== 'false' && !redisClient?.isReady) return res.status(503).json({ error: 'LIVE_REDIS_REQUIRED' });
+  try {
+    if (databaseEnabled()) {
+      const prisma = getPrisma();
+      const candidateId = req.body?.candidateId;
+      const candidate = await prisma.tenant.findUnique({ where: { id: candidateId }, include: { behaviorProfile: true } });
+      const own = await prisma.behaviorProfile.findUnique({ where: { tenantId: req.auth.sub } });
+      if (!candidate?.behaviorProfile || !own?.completedAt) return res.status(400).json({ error: 'PROFILE_REQUIRED' });
+      const existing = await prisma.match.findFirst({ where: { OR: [{ tenantAId: req.auth.sub, tenantBId: candidateId }, { tenantAId: candidateId, tenantBId: req.auth.sub }], status: { in: ['ACCEPTED', 'CONFIRMED'] }, deletedAt: null }, orderBy: { updatedAt: 'desc' } });
+      if (existing) return res.json({ match: { id: existing.id, memberIds: [existing.tenantAId, existing.tenantBId], status: existing.status.toLowerCase(), compatibility: existing.compatibilityScore, breakdown: existing.scoreBreakdown }, reused: true, realtime: 'redis' });
+      await prisma.match.updateMany({ where: { OR: [{ tenantAId: req.auth.sub }, { tenantBId: req.auth.sub }], status: { in: ['REQUESTED', 'ACCEPTED', 'CONFIRMED'] }, deletedAt: null }, data: { status: 'REJECTED' } });
+      let room = await prisma.room.findFirst({ where: { status: 'VACANT', deletedAt: null } });
+      if (!room) room = await prisma.room.findFirst({ where: { deletedAt: null }, orderBy: { updatedAt: 'asc' } });
+      if (!room) return res.status(409).json({ error: 'NO_ROOM_FOR_LIVE_DEMO' });
+      const result = scoreCompatibility(own.answers, candidate.behaviorProfile.answers, store.rules);
+      const match = await prisma.match.create({ data: { tenantAId: req.auth.sub, tenantBId: candidateId, roomId: room.id, compatibilityScore: result.score, scoreBreakdown: result.breakdown, status: 'ACCEPTED', acceptedAt: new Date() } });
+      return res.status(201).json({ match: { id: match.id, memberIds: [match.tenantAId, match.tenantBId], status: 'accepted', compatibility: match.compatibilityScore, breakdown: match.scoreBreakdown }, realtime: 'redis' });
+    }
+    const candidate = store.users.get(req.body?.candidateId);
+    const own = store.profiles.get(req.auth.sub);
+    const other = store.profiles.get(req.body?.candidateId);
+    if (!candidate || candidate.role !== 'tenant' || !own || !other) return res.status(400).json({ error: 'PROFILE_REQUIRED' });
+    const existing = [...store.matches.values()].find((item) => item.memberIds.includes(req.auth.sub) && item.memberIds.includes(candidate.id) && ['accepted', 'confirmed'].includes(item.status));
+    if (existing) return res.json({ match: existing, reused: true, realtime: 'redis' });
+    for (const item of store.matches.values()) if (item.memberIds.includes(req.auth.sub) && ['proposed', 'requested', 'accepted', 'confirmed'].includes(item.status)) item.status = 'rejected';
+    const result = scoreCompatibility(own, other, store.rules);
+    const nowIso = new Date().toISOString();
+    const match = { id: createId(), memberIds: [req.auth.sub, candidate.id], compatibility: result.score, score: result.score, breakdown: result.breakdown, bestReasons: result.bestReasons, watchouts: result.watchouts, status: 'accepted', acceptedAt: nowIso, createdAt: nowIso };
+    store.matches.set(match.id, match);
+    return res.status(201).json({ match, realtime: 'redis' });
+  } catch (error) {
+    return next(error);
+  }
+});
 
 // Database match creation is intentionally placed before the legacy mock route.
 // A request is not a chat permission: only ACCEPTED/CONFIRMED matches may open chat.
@@ -148,33 +227,12 @@ app.post('/api/v1/matches', requireToken, async (req, res, next) => {
     if (!candidate?.behaviorProfile || !own?.completedAt) return res.status(400).json({ error: 'PROFILE_REQUIRED' });
     if (!matchesVariant(own.answers, candidate.behaviorProfile.answers, requestVariant(req))) return res.status(409).json({ error: 'VARIANT_MATCH_REQUIRED' });
 
-    const existingPair = await prisma.match.findFirst({
-      where: {
-        OR: [{ tenantAId: req.auth.sub, tenantBId: candidateId }, { tenantAId: candidateId, tenantBId: req.auth.sub }],
-        status: { in: ['REQUESTED', 'ACCEPTED', 'CONFIRMED'] },
-        deletedAt: null,
-      },
-      orderBy: { updatedAt: 'desc' },
-    });
-    if (existingPair) {
-      if (existingPair.tenantAId === candidateId && existingPair.tenantBId === req.auth.sub && existingPair.status === 'REQUESTED') {
-        const accepted = await prisma.match.update({ where: { id: existingPair.id }, data: { status: 'ACCEPTED', acceptedAt: new Date() } });
-        return res.json({ match: { id: accepted.id, memberIds: [accepted.tenantAId, accepted.tenantBId], status: 'accepted', compatibility: accepted.compatibilityScore, breakdown: accepted.scoreBreakdown }, reused: true, mutual: true });
-      }
-      return res.json({ match: { id: existingPair.id, memberIds: [existingPair.tenantAId, existingPair.tenantBId], status: existingPair.status.toLowerCase(), compatibility: existingPair.compatibilityScore, breakdown: existingPair.scoreBreakdown }, reused: true, mutual: existingPair.status !== 'REQUESTED' });
-    }
+    const guarded = await createOrReuseDatabaseMatch({ prisma, requesterId: req.auth.sub, candidateId, ownAnswers: own.answers, candidateAnswers: candidate.behaviorProfile.answers });
+    if (guarded.conflict) return res.status(409).json({ error: 'MATCH_ALREADY_IN_PROGRESS', match: { id: guarded.match.id, memberIds: [guarded.match.tenantAId, guarded.match.tenantBId], status: guarded.match.status.toLowerCase() } });
+    if (guarded.noRoom) return res.status(409).json({ error: 'NO_AVAILABLE_ROOM' });
+    const guardedMatch = guarded.match;
+    return res.status(guarded.reused ? 200 : 201).json({ match: { id: guardedMatch.id, memberIds: [guardedMatch.tenantAId, guardedMatch.tenantBId], status: guardedMatch.status.toLowerCase(), compatibility: guardedMatch.compatibilityScore, breakdown: guardedMatch.scoreBreakdown }, reused: guarded.reused, mutual: guarded.mutual });
 
-    const existingForUser = await prisma.match.findFirst({
-      where: { OR: [{ tenantAId: req.auth.sub }, { tenantBId: req.auth.sub }], status: { in: ['REQUESTED', 'ACCEPTED', 'CONFIRMED'] }, deletedAt: null },
-      orderBy: { updatedAt: 'desc' },
-    });
-    if (existingForUser) return res.status(409).json({ error: 'MATCH_ALREADY_IN_PROGRESS', match: { id: existingForUser.id, memberIds: [existingForUser.tenantAId, existingForUser.tenantBId], status: existingForUser.status.toLowerCase() } });
-
-    const room = await prisma.room.findFirst({ where: { status: 'VACANT', deletedAt: null } });
-    if (!room) return res.status(409).json({ error: 'NO_AVAILABLE_ROOM' });
-    const result = scoreCompatibility(own.answers, candidate.behaviorProfile.answers, store.rules);
-    const match = await prisma.match.create({ data: { tenantAId: req.auth.sub, tenantBId: candidateId, roomId: room.id, compatibilityScore: result.score, scoreBreakdown: result.breakdown, status: 'REQUESTED' } });
-    return res.status(201).json({ match: { id: match.id, memberIds: [match.tenantAId, match.tenantBId], status: 'requested', compatibility: match.compatibilityScore, breakdown: match.scoreBreakdown }, mutual: false });
   } catch (error) { return next(error); }
 });
 
@@ -186,7 +244,13 @@ app.get('/api/v1/matches/candidates', requireToken, async (req, res, next) => {
     if (!own?.completedAt) return res.status(404).json({ error: 'PROFILE_NOT_FOUND' });
     const variant = requestVariant(req);
     const profiles = await prisma.behaviorProfile.findMany({ where: { tenantId: { not: req.auth.sub }, completedAt: { not: null }, deletedAt: null }, include: { tenant: { select: { id: true, pseudonym: true, age: true, gender: true } } } });
-    const candidates = profiles.filter((item) => matchesVariant(own.answers, item.answers, variant)).map((item) => { const result = scoreCompatibility(own.answers, item.answers, store.rules); return { candidateId: item.tenantId, pseudonym: 'Anonymous tenant', compatibility: result.score, score: result.score, breakdown: result.breakdown, bestReasons: result.bestReasons, watchouts: result.watchouts, variant }; });
+    const candidates = profiles
+      .filter((item) => matchesVariant(own.answers, item.answers, variant))
+      .map((item) => {
+        const result = scoreCompatibility(own.answers, item.answers, store.rules);
+        return { candidateId: item.tenantId, pseudonym: 'Anonymous tenant', compatibility: result.score, score: result.score, breakdown: result.breakdown, bestReasons: result.bestReasons, watchouts: result.watchouts, variant };
+      })
+      .sort((left, right) => right.score - left.score || left.candidateId.localeCompare(right.candidateId));
     const activeRow = await prisma.match.findFirst({ where: { OR: [{ tenantAId: req.auth.sub }, { tenantBId: req.auth.sub }], status: { in: ['ACCEPTED', 'CONFIRMED'] }, deletedAt: null }, select: { id: true, tenantAId: true, tenantBId: true, status: true, compatibilityScore: true, scoreBreakdown: true } });
     const pendingRow = await prisma.match.findFirst({ where: { OR: [{ tenantAId: req.auth.sub }, { tenantBId: req.auth.sub }], status: 'REQUESTED', deletedAt: null }, orderBy: { updatedAt: 'desc' }, select: { id: true, tenantAId: true, tenantBId: true, status: true, compatibilityScore: true, scoreBreakdown: true } });
     const toMatchState = (row) => row ? { id: row.id, memberIds: [row.tenantAId, row.tenantBId], status: row.status.toLowerCase(), compatibility: row.compatibilityScore, score: row.compatibilityScore, breakdown: row.scoreBreakdown } : null;
@@ -203,7 +267,9 @@ app.get('/api/v1/chat/rooms', requireToken, async (req, res, next) => {
   try {
     const type = chatSessionType(req.query.type);
     const rows = await getPrisma().match.findMany({ where: { OR: [{ tenantAId: req.auth.sub }, { tenantBId: req.auth.sub }], status: type === 'ROOMMATE' ? 'CONFIRMED' : { in: ['ACCEPTED', 'CONFIRMED'] }, deletedAt: null }, include: { tenantA: { select: { id: true, pseudonym: true } }, tenantB: { select: { id: true, pseudonym: true } }, chatSessions: { where: { type, deletedAt: null }, orderBy: { updatedAt: 'desc' }, take: 1 } }, orderBy: { updatedAt: 'desc' } });
-    return res.json({ rooms: rows.map((row) => ({ matchId: row.id, compatibility: row.compatibilityScore, score: row.compatibilityScore, partner: row.tenantAId === req.auth.sub ? row.tenantB : row.tenantA, chat: row.chatSessions[0] || null, type })) });
+    const statusRank = { CONFIRMED: 2, ACCEPTED: 1 };
+    const selectedRows = rows.sort((left, right) => (statusRank[right.status] || 0) - (statusRank[left.status] || 0) || right.updatedAt - left.updatedAt).slice(0, 1);
+    return res.json({ rooms: selectedRows.map((row) => ({ matchId: row.id, compatibility: row.compatibilityScore, score: row.compatibilityScore, partner: row.tenantAId === req.auth.sub ? row.tenantB : row.tenantA, chat: row.chatSessions[0] || null, type })) });
   } catch (error) { return next(error); }
 });
 
@@ -458,8 +524,9 @@ app.get('/api/v1/chat/rooms', requireToken, (req, res, next) => {
   const rooms = mockMatchesForUser(req.auth.sub)
     .filter((match) => ['accepted', 'confirmed'].includes(match.status))
     .filter((match) => type !== 'ROOMMATE' || match.status === 'confirmed')
+    .sort((left, right) => (right.status === 'confirmed' ? 1 : 0) - (left.status === 'confirmed' ? 1 : 0) || String(right.updatedAt || right.createdAt).localeCompare(String(left.updatedAt || left.createdAt)))
     .map((match) => mockChatRoom(match, req.auth.sub, type));
-  return res.json({ rooms });
+  return res.json({ rooms: rooms.slice(0, 1) });
 });
 
 const allowedConflictCategories = new Set(['noise', 'cleaning', 'guests', 'shared_space', 'sleep_schedule', 'communication', 'other']);
@@ -468,6 +535,8 @@ const allowedShareCounts = new Set([2, 3, 4]);
 const allowedGenderPreferences = new Set(['any', 'female', 'male', 'non_binary']);
 const allowedAgeBands = new Set(['any', '20s', '30s', '40_plus']);
 const allowedGenders = new Set(['female', 'male', 'non_binary', 'prefer_not_to_say']);
+const allowedMbti = new Set(['ISTJ', 'ISFJ', 'INFP', 'ENFP', 'ESTJ', 'ENTP']);
+const validProfilePhotoData = (value) => value === null || value === '' || (typeof value === 'string' && value.startsWith('data:image/') && value.length <= 120000);
 const allowedPresenceStatuses = new Set(['available', 'sleeping', 'focus']);
 const boundedInt = (value, min, max, fallback = 0) => {
   if (value === null || value === undefined || value === '') return fallback;
@@ -487,10 +556,11 @@ const recordOutcomeLabel = (input) => saveOutcomeLabel({
   getChatFeatures: getChatFeaturesForMatch,
 });
 
-app.get('/health', (_req, res) => res.json({ ok: true, product: 'CheckMate', persistence: databaseEnabled() ? 'postgresql' : 'memory', realtime: redisClient ? 'redis' : 'memory' }));
+app.get('/health', (_req, res) => res.json({ ok: true, product: 'CheckMate', persistence: databaseEnabled() ? 'postgresql' : 'memory', realtime: redisClient?.isReady ? 'redis' : 'memory', liveChat: process.env.LIVE_DEMO_REDIS_REQUIRED !== 'false' ? (redisClient?.isReady ? 'redis-required' : 'redis-unavailable') : (redisClient?.isReady ? 'redis' : 'memory-fallback') }));
 app.post('/api/v1/auth/login', authLimiter, async (req, res, next) => { try { const user = await authenticateAccount(req.body.accountId, req.body.password); if (!user) return res.status(401).json({ error: 'INVALID_CREDENTIALS' }); return res.json({ accessToken: tokenFor(user), tokenType: 'Bearer', expiresInSeconds: 1800, variant: requestVariant(req), user: { id: user.id, accountId: user.accountId, pseudonym: user.pseudonym, role: user.role, operatorId: user.operatorId } }); } catch (error) { return next(error); } });
-app.get('/api/v1/users/me', requireToken, async (req, res, next) => { try { if (databaseEnabled()) { const user = await getPrisma().tenant.findUnique({ where: { id: req.auth.sub }, select: { id: true, loginId: true, pseudonym: true, email: true, age: true, gender: true } }); if (!user) return res.status(404).json({ error: 'USER_NOT_FOUND' }); return res.json({ user: { ...user, accountId: user.loginId, gender: user.gender?.toLowerCase() || null } }); } const user = store.users.get(req.auth.sub); if (!user) return res.status(404).json({ error: 'USER_NOT_FOUND' }); return res.json({ user: { ...user } }); } catch (error) { return next(error); } });
-app.patch('/api/v1/users/me', requireToken, async (req, res, next) => { try { if (req.auth.role !== 'tenant') return res.status(403).json({ error: 'TENANT_ROLE_REQUIRED' }); const pseudonym = typeof req.body.pseudonym === 'string' ? req.body.pseudonym.trim().slice(0, 80) : ''; const email = typeof req.body.email === 'string' ? req.body.email.trim().slice(0, 320) : null; const age = req.body.age === '' || req.body.age === null ? null : Number(req.body.age); const gender = req.body.gender || null; if (pseudonym.length < 2 || (email && !/^\S+@\S+\.\S+$/.test(email)) || (age !== null && (!Number.isInteger(age) || age < 18 || age > 100)) || (gender && !allowedGenders.has(gender))) return res.status(400).json({ error: 'INVALID_PROFILE' }); if (databaseEnabled()) { const user = await getPrisma().tenant.update({ where: { id: req.auth.sub }, data: { pseudonym, email, age, gender: gender ? gender.toUpperCase() : null }, select: { id: true, loginId: true, pseudonym: true, email: true, age: true, gender: true } }); return res.json({ user: { ...user, accountId: user.loginId, gender: user.gender?.toLowerCase() || null } }); } const user = store.users.get(req.auth.sub); if (!user) return res.status(404).json({ error: 'USER_NOT_FOUND' }); Object.assign(user, { pseudonym, email, age, gender }); return res.json({ user }); } catch (error) { return next(error); } });
+app.post('/api/v1/auth/register', authLimiter, async (req, res, next) => { try { const accountId = typeof req.body?.accountId === 'string' ? req.body.accountId.trim() : ''; const password = typeof req.body?.password === 'string' ? req.body.password : ''; const pseudonym = typeof req.body?.pseudonym === 'string' ? req.body.pseudonym.trim().slice(0, 80) : ''; const age = Number(req.body?.age); const gender = typeof req.body?.gender === 'string' ? req.body.gender : 'prefer_not_to_say'; if (!/^[A-Za-z0-9_-]{4,40}$/.test(accountId) || password.length < 4 || pseudonym.length < 2 || !Number.isInteger(age) || age < 18 || age > 100 || !allowedGenders.has(gender)) return res.status(400).json({ error: 'INVALID_SIGNUP_INPUT' }); if (!databaseEnabled()) { const user = registerDevelopmentAccount({ accountId, password, pseudonym, age, gender }); if (!user) return res.status(409).json({ error: 'ACCOUNT_ID_TAKEN' }); return res.status(201).json({ accessToken: tokenFor(user), tokenType: 'Bearer', expiresInSeconds: 1800, user: { id: user.id, accountId: user.accountId, pseudonym: user.pseudonym, age: user.age, gender: user.gender, role: user.role } }); } const prisma = getPrisma(); const exists = await prisma.account.findUnique({ where: { loginId: accountId } }); if (exists) return res.status(409).json({ error: 'ACCOUNT_ID_TAKEN' }); const tenant = await prisma.$transaction(async (tx) => { const createdTenant = await tx.tenant.create({ data: { loginId: accountId, pseudonym, age, gender: gender.toUpperCase() } }); await tx.account.create({ data: { loginId: accountId, passwordHash: hashPassword(password), role: 'TENANT', tenantId: createdTenant.id } }); return createdTenant; }); const user = { id: tenant.id, accountId: tenant.loginId, pseudonym: tenant.pseudonym, age: tenant.age, gender: gender.toLowerCase(), role: 'tenant' }; return res.status(201).json({ accessToken: tokenFor(user), tokenType: 'Bearer', expiresInSeconds: 1800, user }); } catch (error) { if (error?.code === 'P2002') return res.status(409).json({ error: 'ACCOUNT_ID_TAKEN' }); return next(error); } });
+app.get('/api/v1/users/me', requireToken, async (req, res, next) => { try { if (databaseEnabled()) { const user = await getPrisma().tenant.findUnique({ where: { id: req.auth.sub }, select: { id: true, loginId: true, pseudonym: true, email: true, age: true, gender: true, mbti: true, profilePhotoData: true } }); if (!user) return res.status(404).json({ error: 'USER_NOT_FOUND' }); return res.json({ user: { ...user, accountId: user.loginId, gender: user.gender?.toLowerCase() || null, mbti: user.mbti || null } }); } const user = store.users.get(req.auth.sub); if (!user) return res.status(404).json({ error: 'USER_NOT_FOUND' }); return res.json({ user: { ...user } }); } catch (error) { return next(error); } });
+app.patch('/api/v1/users/me', requireToken, async (req, res, next) => { try { if (req.auth.role !== 'tenant') return res.status(403).json({ error: 'TENANT_ROLE_REQUIRED' }); const pseudonym = typeof req.body.pseudonym === 'string' ? req.body.pseudonym.trim().slice(0, 80) : ''; const email = typeof req.body.email === 'string' ? req.body.email.trim().slice(0, 320) : null; const age = req.body.age === '' || req.body.age === null ? null : Number(req.body.age); const gender = req.body.gender || null; const hasMbti = Object.prototype.hasOwnProperty.call(req.body, 'mbti'); const mbti = hasMbti && typeof req.body.mbti === 'string' && req.body.mbti !== 'unknown' && req.body.mbti !== '' ? req.body.mbti.toUpperCase() : hasMbti ? null : undefined; const hasProfilePhoto = Object.prototype.hasOwnProperty.call(req.body, 'profilePhotoData'); const profilePhotoData = hasProfilePhoto ? (req.body.profilePhotoData || null) : undefined; if (pseudonym.length < 2 || (email && !/^\\S+@\\S+\\.\\S+$/.test(email)) || (age !== null && (!Number.isInteger(age) || age < 18 || age > 100)) || (gender && !allowedGenders.has(gender)) || (mbti && !allowedMbti.has(mbti)) || (hasProfilePhoto && !validProfilePhotoData(profilePhotoData))) return res.status(400).json({ error: 'INVALID_PROFILE' }); if (databaseEnabled()) { const user = await getPrisma().tenant.update({ where: { id: req.auth.sub }, data: { pseudonym, email, age, gender: gender ? gender.toUpperCase() : null, ...(hasMbti ? { mbti } : {}), ...(hasProfilePhoto ? { profilePhotoData } : {}) }, select: { id: true, loginId: true, pseudonym: true, email: true, age: true, gender: true, mbti: true, profilePhotoData: true } }); return res.json({ user: { ...user, accountId: user.loginId, gender: user.gender?.toLowerCase() || null, mbti: user.mbti || null } }); } const user = store.users.get(req.auth.sub); if (!user) return res.status(404).json({ error: 'USER_NOT_FOUND' }); Object.assign(user, { pseudonym, email, age, gender, ...(hasMbti ? { mbti } : {}), ...(hasProfilePhoto ? { profilePhotoData } : {}) }); return res.json({ user }); } catch (error) { return next(error); } });
 
 const conditionLogs = new ConditionLogRepository();
 const checkins = new CheckinRepository();
@@ -502,13 +572,42 @@ app.patch('/api/v1/care/checkins/:checkinId/answer', requireToken, requireDataba
 
 // Embedded B2B attribution: retained by operator and room, never by raw personal identifiers.
 app.post('/api/v1/payments/:id/capture', requireToken, async (req, res, next) => { if (!databaseEnabled()) return next('route'); try { const prisma = getPrisma(); const payment = await prisma.payment.findUnique({ where: { id: req.params.id }, include: { match: true } }); if (!payment || !payment.match || ![payment.match.tenantAId, payment.match.tenantBId].includes(req.auth.sub)) return res.status(404).json({ error: 'PAYMENT_NOT_FOUND' }); const paidTenantIds = [...new Set([...(payment.paidTenantIds || []), req.auth.sub])]; const complete = paidTenantIds.includes(payment.match.tenantAId) && paidTenantIds.includes(payment.match.tenantBId); const updated = await prisma.payment.update({ where: { id: payment.id }, data: { paidTenantIds, status: complete ? 'PAID' : 'READY', paidAt: complete ? new Date() : null } }); return res.json({ payment: updated, allTenantsPaid: complete, waitingForOtherTenant: !complete, deadlineMinutes: 10 }); } catch (error) { return next(error); } });
-app.post('/api/v1/funnel/events', (req, res) => { const { operatorId, roomId, funnelId, step } = req.body; if (!operatorId || !roomId || !funnelId || !step) return res.status(400).json({ error: 'ATTRIBUTION_FIELDS_REQUIRED' }); const event = { id: createId(), operatorId, roomId, funnelId, step, createdAt: new Date().toISOString() }; store.funnelEvents.push(event); res.status(201).json({ event }); });
+app.post('/api/v1/funnel/events', (req, res) => { const { operatorId, roomId, funnelId, step, metadata } = req.body; if (!operatorId || !roomId || !funnelId || !step) return res.status(400).json({ error: 'ATTRIBUTION_FIELDS_REQUIRED' }); const safeMetadata = metadata && typeof metadata === 'object' ? { tenantId: typeof metadata.tenantId === 'string' ? metadata.tenantId.slice(0, 80) : null, pseudonym: typeof metadata.pseudonym === 'string' ? metadata.pseudonym.slice(0, 80) : null, variant: typeof metadata.variant === 'string' ? metadata.variant.slice(0, 20) : null, mbti: typeof metadata.mbti === 'string' ? metadata.mbti.slice(0, 8) : null, age: Number.isInteger(Number(metadata.age)) ? Number(metadata.age) : null } : {}; const event = { id: createId(), operatorId, roomId, funnelId, tenantId: safeMetadata.tenantId, metadata: safeMetadata, step, createdAt: new Date().toISOString() }; store.funnelEvents.push(event); res.status(201).json({ event }); });
+const liveDemoState = () => { const events = store.funnelEvents; const unique = (step) => new Set(events.filter((item) => item.step === step && item.tenantId).map((item) => item.tenantId)); const activeSince = Date.now() - 15000; const participants = new Set(events.filter((item) => item.step === 'participant_heartbeat' && item.tenantId && Date.parse(item.createdAt) >= activeSince).map((item) => item.tenantId)); const recentParticipants = []; const seenParticipantIds = new Set(); [...events].filter((item) => item.step === 'participant_joined' && item.metadata?.pseudonym).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).forEach((item) => { if (recentParticipants.length >= 30 || seenParticipantIds.has(item.tenantId)) return; seenParticipantIds.add(item.tenantId); recentParticipants.push({ id: item.tenantId, pseudonym: item.metadata.pseudonym, variant: item.metadata.variant, createdAt: item.createdAt }); }); return { target: Math.max(1, Number(process.env.LIVE_DEMO_TARGET || 30)), participants: participants.size, surveyCompleted: unique('survey_completed').size, matched: unique('match_completed').size, recentParticipants, bestCouple: store.liveDemo.bestCouple, bestCoupleRevealed: store.liveDemo.bestCoupleRevealed, lastActivityAt: events.at(-1)?.createdAt || null, matchRevealed: store.liveDemo.matchRevealed, chatEnabled: store.liveDemo.chatEnabled, revealedAt: store.liveDemo.revealedAt, chatEnabledAt: store.liveDemo.chatEnabledAt }; };
+
+async function buildLiveBestCouple() {
+  const ids = [...new Set(store.funnelEvents.filter((item) => item.step === 'survey_completed' && item.tenantId).map((item) => item.tenantId))];
+  if (ids.length < 2) return null;
+  let people = [];
+  if (databaseEnabled()) {
+    const rows = await getPrisma().tenant.findMany({ where: { id: { in: ids }, deletedAt: null }, include: { behaviorProfile: true } });
+    people = rows.filter((row) => row.behaviorProfile?.completedAt).map((row) => ({ id: row.id, pseudonym: row.pseudonym, age: row.age, gender: row.gender?.toLowerCase() || null, mbti: row.mbti || null, profilePhotoData: row.profilePhotoData || null, answers: row.behaviorProfile.answers || {} }));
+  } else {
+    people = ids.map((id) => { const user = store.users.get(id); return user && store.profiles.has(id) ? { id, pseudonym: user.pseudonym, age: user.age, gender: user.gender || null, mbti: user.mbti || null, profilePhotoData: user.profilePhotoData || null, answers: store.profiles.get(id) } : null; }).filter(Boolean);
+  }
+  let best = null;
+  for (let leftIndex = 0; leftIndex < people.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < people.length; rightIndex += 1) {
+      const left = people[leftIndex];
+      const right = people[rightIndex];
+      const result = scoreCompatibility(left.answers, right.answers, store.rules);
+      if (!best || result.score > best.score) best = { score: result.score, participants: [left, right], reasons: result.bestReasons };
+    }
+  }
+  return best;
+}
+app.get('/api/v1/live-demo/state', (_req, res) => res.json(liveDemoState()));
+app.post('/api/v1/live-demo/matching/reveal', (_req, res) => { store.liveDemo.matchRevealed = true; store.liveDemo.revealedAt = new Date().toISOString(); return res.json(liveDemoState()); });
+app.post('/api/v1/live-demo/chat/activate', (_req, res) => { if (!store.liveDemo.matchRevealed) return res.status(409).json({ error: 'MATCHING_RESULT_REQUIRED' }); store.liveDemo.chatEnabled = true; store.liveDemo.chatEnabledAt = new Date().toISOString(); res.json(liveDemoState()); });
+app.post('/api/v1/live-demo/best-couple/reveal', async (_req, res, next) => { if (!store.liveDemo.chatEnabled) return res.status(409).json({ error: 'LIVE_CHAT_REQUIRED' }); try { store.liveDemo.bestCouple = await buildLiveBestCouple(); if (!store.liveDemo.bestCouple) return res.status(409).json({ error: 'BEST_COUPLE_NOT_READY' }); store.liveDemo.bestCoupleRevealed = true; return res.json(liveDemoState()); } catch (error) { return next(error); } });
+app.post('/api/v1/live-demo/reset', (_req, res) => { store.liveDemo.matchRevealed = false; store.liveDemo.chatEnabled = false; store.liveDemo.bestCoupleRevealed = false; store.liveDemo.bestCouple = null; store.liveDemo.revealedAt = null; store.liveDemo.chatEnabledAt = null; store.funnelEvents = store.funnelEvents.filter((item) => !['participant_joined', 'participant_heartbeat', 'survey_completed', 'match_completed'].includes(item.step)); res.json(liveDemoState()); });
+app.post('/api/v1/live-demo/match', requireToken, async (req, res, next) => { if (!store.liveDemo.chatEnabled) return res.status(409).json({ error: 'LIVE_CHAT_NOT_ENABLED' }); try { const candidateId = req.body?.candidateId; if (databaseEnabled()) { const prisma = getPrisma(); const candidate = await prisma.tenant.findUnique({ where: { id: candidateId }, include: { behaviorProfile: true } }); const own = await prisma.behaviorProfile.findUnique({ where: { tenantId: req.auth.sub } }); if (!candidate?.behaviorProfile || !own?.completedAt) return res.status(400).json({ error: 'PROFILE_REQUIRED' }); const existing = await prisma.match.findFirst({ where: { OR: [{ tenantAId: req.auth.sub }, { tenantBId: req.auth.sub }], status: { in: ['ACCEPTED', 'CONFIRMED'] }, deletedAt: null }, orderBy: { updatedAt: 'desc' } }); if (existing) return res.json({ match: { id: existing.id, memberIds: [existing.tenantAId, existing.tenantBId], status: existing.status.toLowerCase(), compatibility: existing.compatibilityScore, breakdown: existing.scoreBreakdown }, reused: true }); let room = await prisma.room.findFirst({ where: { status: 'VACANT', deletedAt: null } }); if (!room) room = await prisma.room.findFirst({ where: { deletedAt: null }, orderBy: { updatedAt: 'asc' } }); if (!room) return res.status(409).json({ error: 'NO_ROOM_FOR_LIVE_DEMO' }); const result = scoreCompatibility(own.answers, candidate.behaviorProfile.answers, store.rules); const match = await prisma.match.create({ data: { tenantAId: req.auth.sub, tenantBId: candidateId, roomId: room.id, compatibilityScore: result.score, scoreBreakdown: result.breakdown, status: 'ACCEPTED', acceptedAt: new Date() } }); return res.status(201).json({ match: { id: match.id, memberIds: [match.tenantAId, match.tenantBId], status: 'accepted', compatibility: match.compatibilityScore, breakdown: match.scoreBreakdown } }); } const candidate = store.users.get(candidateId); const own = store.profiles.get(req.auth.sub); const other = store.profiles.get(candidateId); if (!candidate || candidate.role !== 'tenant' || !own || !other) return res.status(400).json({ error: 'PROFILE_REQUIRED' }); const existing = [...store.matches.values()].find((item) => item.memberIds.includes(req.auth.sub) && item.memberIds.includes(candidateId) && ['accepted', 'confirmed'].includes(item.status)); if (existing) return res.json({ match: existing, reused: true }); const result = scoreCompatibility(own, other, store.rules); const nowIso = new Date().toISOString(); const match = { id: createId(), memberIds: [req.auth.sub, candidateId], compatibility: result.score, score: result.score, breakdown: result.breakdown, bestReasons: result.bestReasons, watchouts: result.watchouts, status: 'accepted', acceptedAt: nowIso, createdAt: nowIso }; store.matches.set(match.id, match); return res.status(201).json({ match }); } catch (error) { return next(error); } });
 app.post('/api/v1/consents', requireToken, (req, res) => { if (!req.body.agreed) return res.status(400).json({ error: 'CONSENT_REQUIRED' }); const consent = { userId: req.auth.sub, version: '2026-08', agreedAt: new Date().toISOString(), evidenceDigest: digest(`${req.auth.sub}:${req.body.operatorId}:${Date.now()}`) }; store.consents.set(req.auth.sub, consent); res.status(201).json({ consent: { version: consent.version, agreedAt: consent.agreedAt } }); });
 
 // Only virtual identity and affiliation-email adapters are exposed. Provider receipts are digested immediately.
 for (const type of ['identity', 'affiliation']) { app.post(`/api/v1/verifications/${type}/start`, requireToken, (req, res) => res.status(201).json({ transactionId: createId(), provider: type === 'identity' ? 'NICE_PASS_MOCK' : 'EMAIL_MOCK', expiresInSeconds: 300 })); app.post(`/api/v1/verifications/${type}/complete`, requireToken, (req, res) => { const result = { userId: req.auth.sub, type, status: req.body.outcome === 'failed' ? 'failed' : 'passed', evidenceDigest: digest(`${req.auth.sub}:${type}:${req.body.providerReceipt || createId()}`), verifiedAt: new Date().toISOString() }; store.verifications.set(`${req.auth.sub}:${type}`, result); res.json({ type, status: result.status }); }); }
 
-app.put('/api/v1/behavior-profiles/me', requireToken, async (req, res, next) => { try { const keys = ['lateReturnBand', 'sleepTimeBand', 'wakeTimeBand', 'deliveryWasteBand', 'cleaningBand', 'noiseBand', 'guestFrequencyBand', 'cookingBand', 'commonSpaceBand']; const profile = Object.fromEntries(keys.map((key) => [key, Number(req.body[key])]).filter(([, value]) => Number.isInteger(value) && value >= 0 && value <= 3)); if (Object.keys(profile).length !== keys.length) return res.status(400).json({ error: 'INVALID_BEHAVIOR_FREQUENCY' }); const variant = requestVariant(req); const storedProfile = { ...profile, _meta: normalizeProfileMeta(req.body._meta, variant) }; const preferences = normalizeMatchingPreferences(req.body); const completedAt = new Date(); store.profiles.set(req.auth.sub, storedProfile); store.profileCompletedAt.set(req.auth.sub, completedAt.toISOString()); store.preferences.set(req.auth.sub, preferences); if (databaseEnabled()) await getPrisma().behaviorProfile.upsert({ where: { tenantId: req.auth.sub }, create: { tenantId: req.auth.sub, answers: storedProfile, completedAt }, update: { answers: storedProfile, completedAt, deletedAt: null } }); return res.json({ profile: storedProfile, preferences, variant, completed: true, completedAt: completedAt.toISOString() }); } catch (error) { return next(error); } });
+app.put('/api/v1/behavior-profiles/me', requireToken, async (req, res, next) => { try { const keys = ['lateReturnBand', 'sleepTimeBand', 'wakeTimeBand', 'deliveryWasteBand', 'cleaningBand', 'noiseBand', 'guestFrequencyBand', 'cookingBand', 'commonSpaceBand']; const profile = Object.fromEntries(keys.map((key) => [key, Number(req.body[key])]).filter(([, value]) => Number.isInteger(value) && value >= 0 && value <= 3)); if (Object.keys(profile).length !== keys.length) return res.status(400).json({ error: 'INVALID_BEHAVIOR_FREQUENCY' }); if (typeof req.body.mbti === 'string' && /^[A-Za-z]{4}$/.test(req.body.mbti)) profile.mbti = req.body.mbti.toUpperCase(); const age = Number(req.body.age); if (Number.isInteger(age) && age >= 18 && age <= 100) profile.age = age; const variant = requestVariant(req); const preferences = normalizeMatchingPreferences(req.body); const storedProfile = { ...profile, ...preferences, _meta: normalizeProfileMeta(req.body._meta, variant) }; const completedAt = new Date(); store.profiles.set(req.auth.sub, storedProfile); store.profileCompletedAt.set(req.auth.sub, completedAt.toISOString()); store.preferences.set(req.auth.sub, preferences); if (databaseEnabled()) await getPrisma().behaviorProfile.upsert({ where: { tenantId: req.auth.sub }, create: { tenantId: req.auth.sub, answers: storedProfile, completedAt }, update: { answers: storedProfile, completedAt, deletedAt: null } }); return res.json({ profile: storedProfile, preferences, variant, completed: true, completedAt: completedAt.toISOString() }); } catch (error) { return next(error); } });
 app.get('/api/v1/behavior-profiles/me', requireToken, async (req, res, next) => { try { if (databaseEnabled()) { const profile = await getPrisma().behaviorProfile.findUnique({ where: { tenantId: req.auth.sub }, select: { answers: true, completedAt: true } }); return res.json({ profile: profile?.answers || null, completed: Boolean(profile?.completedAt), completedAt: profile?.completedAt || null }); } return res.json({ profile: store.profiles.get(req.auth.sub) || null, completed: Boolean(store.profileCompletedAt.get(req.auth.sub)), completedAt: store.profileCompletedAt.get(req.auth.sub) || null }); } catch (error) { return next(error); } });
 // Database-backed matching flow. The legacy in-memory implementation below is used only in MOCK_MODE.
 app.post('/api/v1/matches', requireToken, async (req, res, next) => { if (!databaseEnabled()) return next('route'); try { const prisma = getPrisma(); const candidateId = req.body.candidateId; const candidate = await prisma.tenant.findUnique({ where: { id: candidateId }, include: { behaviorProfile: true } }); const own = await prisma.behaviorProfile.findUnique({ where: { tenantId: req.auth.sub } }); if (!candidate?.behaviorProfile || !own?.completedAt) return res.status(400).json({ error: 'PROFILE_REQUIRED' }); const room = await prisma.room.findFirst({ where: { status: 'VACANT', deletedAt: null } }); if (!room) return res.status(409).json({ error: 'NO_AVAILABLE_ROOM' }); const existing = await prisma.match.findFirst({ where: { OR: [{ tenantAId: req.auth.sub, tenantBId: candidateId }, { tenantAId: candidateId, tenantBId: req.auth.sub }], roomId: room.id, deletedAt: null } }); if (existing) return res.json({ match: { id: existing.id, memberIds: [existing.tenantAId, existing.tenantBId], status: existing.status.toLowerCase() }, reused: true }); const reverse = await prisma.match.findFirst({ where: { tenantAId: candidateId, tenantBId: req.auth.sub, status: 'REQUESTED', deletedAt: null } }); const result = scoreCompatibility(own.answers, candidate.behaviorProfile.answers, store.rules); const match = reverse ? await prisma.match.update({ where: { id: reverse.id }, data: { status: 'ACCEPTED', acceptedAt: new Date(), compatibilityScore: result.score, scoreBreakdown: result.breakdown } }) : await prisma.match.create({ data: { tenantAId: req.auth.sub, tenantBId: candidateId, roomId: room.id, compatibilityScore: result.score, scoreBreakdown: result.breakdown, status: 'REQUESTED' } }); return res.status(reverse ? 200 : 201).json({ match: { id: match.id, memberIds: [match.tenantAId, match.tenantBId], status: match.status.toLowerCase(), compatibility: match.compatibilityScore, breakdown: match.scoreBreakdown }, mutual: Boolean(reverse) }); } catch (error) { return next(error); } });
@@ -549,7 +648,7 @@ app.get('/api/v1/operators/:operatorId/mediation-tickets', requireToken, require
 // 30/90-day feedback becomes a training label and nudges the relevant rule weight.
 app.post('/api/v1/feedback', requireToken, (req, res) => { const checkpoint = Number(req.body.checkpoint); const satisfaction = Number(req.body.satisfaction); if (![30, 90].includes(checkpoint)) return res.status(400).json({ error: 'CHECKPOINT_MUST_BE_30_OR_90' }); if (!Number.isInteger(satisfaction) || satisfaction < 1 || satisfaction > 5) return res.status(400).json({ error: 'INVALID_SATISFACTION' }); const outcome = recordOutcomeLabel({ contractId: req.body.contractId, userId: req.auth.sub, checkpoint, satisfaction, conflict: Boolean(req.body.conflict), earlyExit: Boolean(req.body.earlyExit), conflictCategories: req.body.conflictCategories, source: 'feedback_api' }); res.status(201).json({ feedback: outcome.feedback, patternAggregate: outcome.aggregate, updatedRule: outcome.updatedRule }); });
 app.get('/api/v1/operators/:operatorId/feedback-insights', requireToken, requireOperator, (req, res) => { if (req.auth.operatorId !== req.params.operatorId) return res.status(403).json({ error: 'OPERATOR_SCOPE_REQUIRED' }); const labels = [...store.feedback.values()]; const conflicts = labels.filter((item) => item.label === 'compatibility_risk'); const categories = conflicts.flatMap((item) => item.conflictCategories || []).reduce((counts, category) => ({ ...counts, [category]: (counts[category] || 0) + 1 }), {}); res.json({ trainingSamples: labels.length, conflictSamples: conflicts.length, stableSamples: labels.filter((item) => item.label === 'stable_match').length, conflictCategories: categories, topPatterns: [...store.patternAggregates.values()].sort((a, b) => b.conflictSamples - a.conflictSamples).slice(0, 10) }); });
-app.get('/api/v1/operators/:operatorId/dashboard', requireToken, requireOperator, (req, res) => { if (req.auth.operatorId !== req.params.operatorId) return res.status(403).json({ error: 'OPERATOR_SCOPE_REQUIRED' }); const events = store.funnelEvents.filter(item => item.operatorId === req.params.operatorId); const count = (step, fallback) => { const value = new Set(events.filter(item => item.step === step).map(item => item.funnelId)).size; return value || fallback; }; const tickets = [...store.tickets.values()].filter(ticket => ticket.operatorId === req.params.operatorId && ticket.status !== 'closed'); res.json({ kpis: [{ label: 'Monthly entries', value: String(count('entry', 248)), change: '+12%' }, { label: 'Verification complete', value: '82%', change: '+6.4%p' }, { label: 'Match success', value: '61%', change: '+8.1%p' }, { label: '30-day retention', value: '94%', change: '+4.0%p' }], funnel: [{ label: 'Entry', value: count('entry', 248) }, { label: 'Survey', value: count('survey', 203) }, { label: 'Match', value: count('match', 149) }, { label: 'Move-in', value: count('contract_confirmed', 91) }], openMediationTickets: tickets.length, recentTickets: tickets.slice(0, 5) }); });
+app.get('/api/v1/operators/:operatorId/dashboard', requireToken, requireOperator, (req, res) => { if (req.auth.operatorId !== req.params.operatorId) return res.status(403).json({ error: 'OPERATOR_SCOPE_REQUIRED' }); const events = store.funnelEvents.filter(item => item.operatorId === req.params.operatorId); const count = (step, fallback) => { const value = new Set(events.filter(item => item.step === step).map(item => item.funnelId)).size; return value || fallback; }; const unique = (step) => new Set(events.filter(item => item.step === step && item.tenantId).map(item => item.tenantId)); const participants = unique('participant_joined'); const activeSince = Date.now() - 15000; const activeParticipants = new Set(events.filter(item => item.step === 'participant_heartbeat' && item.tenantId && Date.parse(item.createdAt) >= activeSince).map(item => item.tenantId)); const completed = unique('survey_completed'); const matched = new Set(events.filter(item => ['match', 'match_completed'].includes(item.step) && item.tenantId).map(item => item.tenantId)); const recentParticipants = [...events].filter(item => item.step === 'participant_joined' && item.metadata?.pseudonym).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 8).map(item => ({ id: item.tenantId, pseudonym: item.metadata.pseudonym, variant: item.metadata.variant, createdAt: item.createdAt })); const tickets = [...store.tickets.values()].filter(ticket => ticket.operatorId === req.params.operatorId && ticket.status !== 'closed'); const target = Math.max(1, Number(process.env.LIVE_DEMO_TARGET || 20)); res.json({ kpis: [{ label: 'Monthly entries', value: String(count('entry', 248)), change: '+12%' }, { label: 'Verification complete', value: participants.size ? `${Math.round(completed.size / participants.size * 100)}%` : '0%', change: '+6.4%p' }, { label: 'Match success', value: matched.size ? `${Math.round(matched.size / Math.max(1, completed.size) * 100)}%` : '0%', change: '+8.1%p' }, { label: '30-day retention', value: '94%', change: '+4.0%p' }], funnel: [{ label: 'Entry', value: count('entry', 248) }, { label: 'Survey', value: completed.size || count('survey', 203) }, { label: 'Match', value: matched.size || count('match', 149) }, { label: 'Move-in', value: count('contract_confirmed', 91) }], liveDemo: { target, participants: activeParticipants.size, surveyCompleted: completed.size, matched: matched.size, recentParticipants, lastActivityAt: events.at(-1)?.createdAt || null }, openMediationTickets: tickets.length, recentTickets: tickets.slice(0, 5) }); });
 io.use((socket, next) => { try { socket.user = jwt.verify(socket.handshake.auth?.token, JWT_SECRET, { issuer: 'checkmate' }); next(); } catch { next(new Error('UNAUTHORIZED')); } });
 // Typed transport used by the two chat lifecycles. Legacy events below remain
 // available for existing clients, while these events isolate Redis rooms and

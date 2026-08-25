@@ -145,6 +145,8 @@ model Tenant {
   email     String?   @db.VarChar(320)
   age       Int?      @db.SmallInt
   gender    Gender?
+  mbti      String?   @db.VarChar(8)
+  profilePhotoData String? @db.Text
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?

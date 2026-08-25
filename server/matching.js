@@ -21,26 +21,30 @@ function fitMessage(distance) {
 
 export function scoreCompatibility(left = {}, right = {}, rules = DEFAULT_RULES) {
   const activeRules = rules.filter((rule) => rule.enabled);
-  const totalWeight = activeRules.reduce((sum, rule) => sum + rule.weight, 0);
-  const breakdown = activeRules.map((rule) => {
+  const behaviorBreakdown = activeRules.map((rule) => {
     const leftValue = Number.isInteger(left[rule.key]) ? left[rule.key] : 1;
     const rightValue = Number.isInteger(right[rule.key]) ? right[rule.key] : 1;
     const distance = Math.abs(leftValue - rightValue);
     const fit = Math.max(0, 1 - distance / Math.max(1, rule.maxDistance));
-    return {
-      key: rule.key,
-      label: rule.label,
-      weight: rule.weight,
-      distance,
-      matched: distance <= 1,
-      fitPercent: Math.round(fit * 100),
-      contribution: Math.round(fit * rule.weight),
-      message: fitMessage(distance),
-    };
+    return { key: rule.key, label: rule.label, weight: rule.weight, distance, matched: distance <= 1, fitPercent: Math.round(fit * 100), contribution: Math.round(fit * rule.weight), message: fitMessage(distance) };
   });
+
+  // Housing compatibility is part of the explainable score, not just a UI filter.
+  // A room type mismatch is a hard lifestyle difference; a share-count difference
+  // is softer because a nearby room configuration may still work.
+  const roomTypeDistance = left.roomType && right.roomType && left.roomType !== right.roomType ? 2 : 0;
+  const leftShareCount = Number(left.shareCount) || 2;
+  const rightShareCount = Number(right.shareCount) || 2;
+  const shareCountDistance = Math.abs(leftShareCount - rightShareCount);
+  const housingBreakdown = [
+    { key: 'roomType', label: '주거 형태', weight: 10, distance: roomTypeDistance, matched: roomTypeDistance === 0, fitPercent: roomTypeDistance === 0 ? 100 : 0, contribution: roomTypeDistance === 0 ? 10 : 0, message: roomTypeDistance === 0 ? '선택한 주거 형태가 같아요.' : '선택한 주거 형태가 달라요.' },
+    { key: 'shareCount', label: '쉐어 인원', weight: 8, distance: shareCountDistance, matched: shareCountDistance <= 1, fitPercent: Math.max(0, 100 - shareCountDistance * 35), contribution: Math.round(Math.max(0, 1 - shareCountDistance * .35) * 8), message: shareCountDistance === 0 ? '함께 살고 싶은 인원 수가 같아요.' : '희망 쉐어 인원에 차이가 있어요.' },
+  ];
+  const breakdown = [...behaviorBreakdown, ...housingBreakdown];
+  const totalWeight = breakdown.reduce((sum, item) => sum + item.weight, 0);
   const score = totalWeight ? Math.round((breakdown.reduce((sum, item) => sum + item.contribution, 0) / totalWeight) * 100) : 0;
   const bestReasons = [...breakdown].sort((a, b) => b.contribution - a.contribution || a.distance - b.distance).slice(0, 3);
-  const watchouts = breakdown.filter((item) => item.distance >= 2).sort((a, b) => b.weight - a.weight).slice(0, 2);
+  const watchouts = breakdown.filter((item) => item.distance >= 2 || item.fitPercent < 50).sort((a, b) => b.weight - a.weight).slice(0, 2);
   return { score, breakdown, bestReasons, watchouts, matchedCount: breakdown.filter((item) => item.matched).length, totalRules: breakdown.length };
 }
 

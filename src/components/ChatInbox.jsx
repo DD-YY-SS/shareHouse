@@ -35,7 +35,7 @@ export default function ChatInbox({ auth, back, onOpen }) {
 
   useEffect(() => {
     load();
-    const timer = setInterval(load, 3000);
+    const timer = setInterval(load, 5000);
     return () => clearInterval(timer);
   }, [auth.accessToken]);
 

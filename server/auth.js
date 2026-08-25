@@ -15,7 +15,7 @@ function accountUser(account) {
   if (!account || account.disabledAt || account.deletedAt) return null;
   const subject = account.role === 'TENANT' ? account.tenant : account.operator;
   if (!subject || subject.deletedAt) return null;
-  return { id: subject.id, accountId: account.loginId, role: account.role.toLowerCase(), pseudonym: account.role === 'TENANT' ? subject.pseudonym : subject.name, operatorId: account.role === 'OPERATOR' ? subject.id : undefined, authAccountId: account.id };
+  return { id: subject.id, accountId: account.loginId, role: account.role.toLowerCase(), pseudonym: account.role === 'TENANT' ? subject.pseudonym : subject.name, age: account.role === 'TENANT' ? subject.age : undefined, gender: account.role === 'TENANT' ? subject.gender?.toLowerCase() : undefined, mbti: account.role === 'TENANT' ? subject.mbti || null : undefined, profilePhotoData: account.role === 'TENANT' ? subject.profilePhotoData || null : undefined, operatorId: account.role === 'OPERATOR' ? subject.id : undefined, authAccountId: account.id };
 }
 
 // Stored format: scrypt$hex-salt$hex-derived-key. Passwords are never logged.

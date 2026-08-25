@@ -32,6 +32,7 @@
     "node-cron": "latest",
     "openai": "^4.58.0",
     "pg": "latest",
+    "qrcode": "^1.5.4",
     "react": "latest",
     "react-dom": "latest",
     "redis": "latest",
