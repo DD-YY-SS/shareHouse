@@ -9,3 +9,5 @@ db/*.sqlite
 .DS_Store
 
 .vercel
+.local-postgres/
+.local-postgres.log

@@ -1,4 +1,4 @@
-import { React, useEffect, useState, API, responseJson, BadgeCheck, ArrowRight, Check, Clock3, FileCheck2, MessageCircle, ShieldCheck } from '../shared.js';
+import { React, useEffect, useState, API, responseJson, BadgeCheck, ArrowRight, Check, ChevronLeft, Clock3, FileCheck2, MessageCircle, ShieldCheck } from '../shared.js';
 import MediationSheet from './MediationSheet.jsx';
 import './presence.css';
 
@@ -18,6 +18,7 @@ export default function CarePage({ roomId, matchId, auth, back }) {
   const [presence, setPresence] = useState([]);
   const [presenceOpen, setPresenceOpen] = useState(false);
   const [presenceSaving, setPresenceSaving] = useState(false);
+  const [careAccess, setCareAccess] = useState(matchId ? null : false);
   const headers = { Authorization: `Bearer ${auth?.accessToken}`, 'Content-Type': 'application/json' };
 
   const loadPresence = async () => {
@@ -29,16 +30,21 @@ export default function CarePage({ roomId, matchId, auth, back }) {
   };
   useEffect(() => { sessionStorage.setItem(careKey, start); const timer = setInterval(() => setNow(Date.now()), 60000); return () => clearInterval(timer); }, [careKey, start]);
   useEffect(() => {
+    setCareAccess(matchId ? null : false);
+  }, [matchId]);
+  useEffect(() => {
     if (!matchId || !auth?.accessToken) return undefined;
     let cancelled = false;
     responseJson(fetch(`${API}/api/v1/matches/${matchId}/payment-status`, { headers }))
       .then((data) => {
-        if (cancelled || !data.allTenantsPaid) return;
+        if (cancelled) return;
+        if (!data.allTenantsPaid) { setCareAccess(false); return; }
+        setCareAccess(true);
         const persisted = sessionStorage.getItem(careKey);
         const serverStart = data.payment?.paidAt || new Date().toISOString();
         if (!persisted) setStart(serverStart);
       })
-      .catch(() => undefined);
+      .catch(() => { if (!cancelled) setCareAccess(false); });
     return () => { cancelled = true; };
   }, [matchId, auth?.accessToken, careKey]);
   useEffect(() => { loadPresence(); const timer = setInterval(loadPresence, 30000); return () => clearInterval(timer); }, [matchId, auth?.accessToken]);
@@ -61,6 +67,9 @@ export default function CarePage({ roomId, matchId, auth, back }) {
   const roommate = presence.find((item) => !item.isSelf)?.status || 'available';
   const ownOption = presenceOptions.find((item) => item.value === mine);
   const roommateOption = presenceOptions.find((item) => item.value === roommate);
+
+  if (careAccess === null) return <section className="page-pad inner-page"><p className="muted">입주 상태를 확인하고 있어요...</p></section>;
+  if (!careAccess) return <section className="page-pad inner-page"><button className="back-button" onClick={back}><ChevronLeft size={19} /> 뒤로</button><h2>아직 입주 확정 전이에요.</h2><p className="muted">두 분 모두 결제를 완료하면 30일 케어가 시작됩니다.</p></section>;
 
   return <section className="page-pad inner-page care-page">
     <div className="care-header"><div><div className="care-page-badge"><ShieldCheck size={17}/>30-DAY CARE</div><h2>Reservation confirmed.<br/>Care has started.</h2><p className="muted">Room {roomId || '101'} - safer adaptation together.</p></div><div className="care-celebrate"><Check size={24}/></div></div>

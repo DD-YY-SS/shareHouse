@@ -45,14 +45,3 @@ jobs:
       - run: npx vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN"
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-
-  deploy-render:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: verify
-    runs-on: ubuntu-latest
-    environment: production
-    steps:
-      # Render performs a rolling deploy and will only route traffic after healthCheckPath is green.
-      - run: curl --fail --silent --show-error -X POST "$RENDER_DEPLOY_HOOK_URL"
-        env:
-          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}

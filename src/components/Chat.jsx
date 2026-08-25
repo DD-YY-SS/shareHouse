@@ -1,6 +1,6 @@
-import { React, useEffect, useRef, useState, API, io, ChevronLeft, CreditCard, LockKeyhole, Send, ShieldCheck, ArrowRight } from '../shared.js';
+import { React, useEffect, useRef, useState, API, io, ChevronLeft, CreditCard, FileCheck2, LockKeyhole, Send, ShieldCheck, ArrowRight } from '../shared.js';
 
-export default function Chat({ auth, chat, type = 'PRE_MOVE', back, confirm }) {
+export default function Chat({ auth, chat, type = 'PRE_MOVE', back, confirm, onAgreementDraft }) {
   const roommateChat = type === 'ROOMMATE';
   const careStarted = Boolean(sessionStorage.getItem(`cm-care-start-${auth?.user?.id || ''}`));
   const [remaining, setRemaining] = useState(() => roommateChat ? null : (chat ? Math.max(0, Math.floor((Date.parse(chat.expiresAt) - Date.now()) / 1000)) : 1800));
@@ -57,6 +57,7 @@ export default function Chat({ auth, chat, type = 'PRE_MOVE', back, confirm }) {
     </>}
     {roommateChat && <div className="chat-policy"><ShieldCheck size={13} />입주가 확정된 룸메이트 전용 영구 채팅입니다.</div>}
     <div className="messages">{messages.map((message) => <div className={`bubble ${message.from === auth.user.id ? 'mine' : 'other'}`} key={message.id}>{message.text || message.body}</div>)}</div>
+    {!roommateChat && <button type="button" className="agreement-mini-button agreement-floating-button" onClick={() => onAgreementDraft?.({ matchId: chat.matchId, messages })} disabled={!messages.length} aria-label="생활 협약서 초안 만들기" title="생활 협약서 초안 만들기"><FileCheck2 size={16} /></button>}
     <div className="chat-input"><input disabled={!online || (!roommateChat && !remaining)} value={text} onChange={(event) => setText(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && send()} placeholder={online ? '메시지를 입력하세요' : '연결 중...'} /><button onClick={send} disabled={!online || (!roommateChat && !remaining)}><Send size={18} /></button></div>
     {!roommateChat && remaining > 0 && !careStarted && <button className="primary-button chat-confirm" onClick={confirm}>채팅을 마치고 입주 확정하기 <ArrowRight size={18} /></button>}
   </section>;

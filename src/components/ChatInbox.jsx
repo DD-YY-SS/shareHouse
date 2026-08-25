@@ -10,15 +10,16 @@ export default function ChatInbox({ auth, back, onOpen }) {
   const [error, setError] = useState('');
 
   const headers = { Authorization: `Bearer ${auth.accessToken}`, 'Content-Type': 'application/json' };
+  const getOptions = { headers, cache: 'no-store' };
 
   // 세션 저장값이 없어도 DB에 확정된 룸메이트 채팅방이 있으면 자동 복원합니다.
   const load = async () => {
     try {
       const [incoming, outgoing, preMove, roommate] = await Promise.all([
-        responseJson(await fetch(`${API}/api/v1/chat/requests`, { headers })),
-        responseJson(await fetch(`${API}/api/v1/chat/requests/sent`, { headers })),
-        responseJson(await fetch(`${API}/api/v1/chat/rooms?type=PRE_MOVE`, { headers })),
-        responseJson(await fetch(`${API}/api/v1/chat/rooms?type=ROOMMATE`, { headers })),
+        responseJson(await fetch(`${API}/api/v1/chat/requests`, getOptions)),
+        responseJson(await fetch(`${API}/api/v1/chat/requests/sent`, getOptions)),
+        responseJson(await fetch(`${API}/api/v1/chat/rooms?type=PRE_MOVE`, getOptions)),
+        responseJson(await fetch(`${API}/api/v1/chat/rooms?type=ROOMMATE`, getOptions)),
       ]);
 
       const roommateRooms = roommate.rooms || [];
@@ -32,7 +33,11 @@ export default function ChatInbox({ auth, back, onOpen }) {
     }
   };
 
-  useEffect(() => { load(); }, [auth.accessToken]);
+  useEffect(() => {
+    load();
+    const timer = setInterval(load, 3000);
+    return () => clearInterval(timer);
+  }, [auth.accessToken]);
 
   const accept = async (id) => {
     setBusy(id);

@@ -113,6 +113,13 @@ enum GuaranteeStatus {
   COMPLETED
 }
 
+enum PresenceStatus {
+  ONLINE
+  AWAY
+  SLEEPING
+  DO_NOT_DISTURB
+}
+
 model Operator {
   id           String    @id @default(uuid()) @db.Uuid
   name         String
@@ -160,6 +167,7 @@ model Tenant {
   account          Account?
   conditionLogs    RoomConditionLog[]
   careCheckins     CareCheckin[]
+  presenceStatuses RoommatePresence[]
 
   @@index([deletedAt])
 }
@@ -306,12 +314,32 @@ model Match {
   chatSessions ChatSession[]
   agreement   DigitalAgreement?
   careCheckins CareCheckin[]
+  presenceStatuses RoommatePresence[]
 
   @@unique([tenantAId, tenantBId, roomId])
   @@index([roomId, status])
   @@index([tenantAId, status])
   @@index([tenantBId, status])
   @@index([status, compatibilityScore])
+  @@index([deletedAt])
+}
+
+model RoommatePresence {
+  id        String         @id @default(uuid()) @db.Uuid
+  matchId   String         @db.Uuid
+  tenantId  String         @db.Uuid
+  status    PresenceStatus @default(ONLINE)
+  expiresAt DateTime?
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+  deletedAt DateTime?
+
+  match  Match  @relation(fields: [matchId], references: [id])
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([matchId, tenantId])
+  @@index([matchId, expiresAt])
+  @@index([tenantId, updatedAt])
   @@index([deletedAt])
 }
 

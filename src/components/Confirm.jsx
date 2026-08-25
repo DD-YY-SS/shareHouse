@@ -37,9 +37,11 @@ export default function Confirm({ roomId, matchId, paymentId, back, done, care }
           setPaid(true);
           setWaiting(false);
         } else if (data.currentUserPaid) {
+          sessionStorage.removeItem(careKey);
           setPaid(false);
           setWaiting(true);
         } else {
+          sessionStorage.removeItem(careKey);
           setPaid(false);
           setWaiting(false);
         }
@@ -50,6 +52,28 @@ export default function Confirm({ roomId, matchId, paymentId, back, done, care }
 
     return () => { cancelled = true; };
   }, [matchId, paymentId, careKey]);
+
+  // The other tenant may pay while this screen is open. Keep the waiting
+  // state synchronized with the database without requiring a refresh.
+  useEffect(() => {
+    if (!matchId) return undefined;
+    const auth = JSON.parse(sessionStorage.getItem('cm-auth') || 'null');
+    const check = () => responseJson(fetch(`${API}/api/v1/matches/${matchId}/payment-status`, { headers: { Authorization: `Bearer ${auth?.accessToken || ''}` }, cache: 'no-store' }))
+      .then((data) => {
+        if (data.allTenantsPaid) {
+          sessionStorage.setItem(careKey, sessionStorage.getItem(careKey) || data.payment?.paidAt || new Date().toISOString());
+          setPaid(true);
+          setWaiting(false);
+        } else {
+          sessionStorage.removeItem(careKey);
+          setPaid(false);
+          setWaiting(Boolean(data.currentUserPaid));
+        }
+      })
+      .catch(() => undefined);
+    const timer = setInterval(check, 3000);
+    return () => clearInterval(timer);
+  }, [matchId, careKey]);
 
   const pay = async () => {
     setBusy(true);

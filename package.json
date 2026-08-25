@@ -16,27 +16,29 @@
     "db:seed": "node server/scripts/seed-production.js"
   },
   "dependencies": {
+    "@instructor-ai/instructor": "^1.7.0",
+    "@prisma/client": "^6.19.0",
+    "@socket.io/redis-adapter": "latest",
     "@vitejs/plugin-react": "latest",
-    "vite": "latest",
-    "react": "latest",
-    "react-dom": "latest",
-    "socket.io-client": "latest",
-    "lucide-react": "latest",
+    "cookie-parser": "latest",
     "cors": "latest",
     "dotenv": "latest",
     "express": "latest",
+    "express-rate-limit": "latest",
+    "helmet": "latest",
     "jsonwebtoken": "latest",
+    "lucide-react": "latest",
+    "morgan": "latest",
     "node-cron": "latest",
+    "openai": "^4.58.0",
     "pg": "latest",
-    "@prisma/client": "^6.19.0",
-    "socket.io": "latest",
+    "react": "latest",
+    "react-dom": "latest",
     "redis": "latest",
-    "@socket.io/redis-adapter": "latest"
-    ,"cookie-parser": "latest"
-    ,"express-rate-limit": "latest"
-    ,"helmet": "latest"
-    ,"morgan": "latest"
-    ,"zod": "latest"
+    "socket.io": "latest",
+    "socket.io-client": "latest",
+    "vite": "latest",
+    "zod": "latest"
   },
   "devDependencies": {
     "prisma": "^6.19.0"
