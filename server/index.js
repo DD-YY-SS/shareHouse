@@ -88,6 +88,38 @@ async function createOrReuseDatabaseMatch({ prisma, requesterId, candidateId, ow
     return { match, reused: false, mutual: false };
   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, maxWait: 5000, timeout: 10000 });
 }
+// The live demo can be started against a freshly initialized production DB
+// before an operator has created a room. Provision one non-user-facing demo
+// room on demand so the chat flow is not blocked by an empty Room table.
+async function ensureLiveDemoRoom(prisma) {
+  const existing = await prisma.room.findFirst({
+    where: { deletedAt: null },
+    orderBy: [{ status: 'asc' }, { updatedAt: 'asc' }],
+  });
+  if (existing) return existing;
+
+  let operator = await prisma.operator.findFirst({ where: { deletedAt: null }, orderBy: { createdAt: 'asc' } });
+  if (!operator) {
+    operator = await prisma.operator.upsert({
+      where: { slug: 'checkmate-live-demo' },
+      update: { deletedAt: null },
+      create: {
+        name: 'CheckMate 라이브 시연 운영사',
+        slug: 'checkmate-live-demo',
+        contactEmail: 'demo@checkmate.local',
+      },
+    });
+  }
+
+  return prisma.room.create({
+    data: {
+      operatorId: operator.id,
+      externalRoomId: 'LIVE-DEMO-101',
+      name: 'CheckMate 라이브 시연 공간',
+      status: 'VACANT',
+    },
+  });
+}
 const scorePayload = (result) => ({ items: result.breakdown, domains: result.domainBreakdown, totalDistance: result.totalDistance });
 const unpackScorePayload = (value) => Array.isArray(value) ? { items: value, domains: [] } : { items: value?.items || [], domains: value?.domains || [], totalDistance: value?.totalDistance ?? null };
 const io = new Server(server, { cors: { origin: [...allowedOrigins], credentials: true } });
@@ -201,9 +233,7 @@ app.post('/api/v1/live-demo/match', requireToken, async (req, res, next) => {
       const existing = await prisma.match.findFirst({ where: { OR: [{ tenantAId: req.auth.sub, tenantBId: candidateId }, { tenantAId: candidateId, tenantBId: req.auth.sub }], status: { in: ['ACCEPTED', 'CONFIRMED'] }, deletedAt: null }, orderBy: { updatedAt: 'desc' } });
       if (existing) return res.json({ match: { id: existing.id, memberIds: [existing.tenantAId, existing.tenantBId], status: existing.status.toLowerCase(), compatibility: existing.compatibilityScore, breakdown: existing.scoreBreakdown }, reused: true, realtime: 'redis' });
       await prisma.match.updateMany({ where: { OR: [{ tenantAId: req.auth.sub }, { tenantBId: req.auth.sub }], status: { in: ['REQUESTED', 'ACCEPTED', 'CONFIRMED'] }, deletedAt: null }, data: { status: 'REJECTED' } });
-      let room = await prisma.room.findFirst({ where: { status: 'VACANT', deletedAt: null } });
-      if (!room) room = await prisma.room.findFirst({ where: { deletedAt: null }, orderBy: { updatedAt: 'asc' } });
-      if (!room) return res.status(409).json({ error: 'NO_ROOM_FOR_LIVE_DEMO' });
+      const room = await ensureLiveDemoRoom(prisma);
       const result = scoreCompatibility(own.answers, candidate.behaviorProfile.answers, store.rules);
       const match = await prisma.match.create({ data: { tenantAId: req.auth.sub, tenantBId: candidateId, roomId: room.id, compatibilityScore: result.score, scoreBreakdown: result.breakdown, status: 'ACCEPTED', acceptedAt: new Date() } });
       return res.status(201).json({ match: { id: match.id, memberIds: [match.tenantAId, match.tenantBId], status: 'accepted', compatibility: match.compatibilityScore, breakdown: match.scoreBreakdown }, realtime: 'redis' });
