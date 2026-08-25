@@ -3,7 +3,6 @@ export { io } from 'socket.io-client';
 export { ArrowRight, BadgeCheck, BarChart3, CalendarDays, Camera, HeartHandshake, Check, ChevronLeft, ChevronRight, Clock3, CreditCard, FileCheck2, Home, LockKeyhole, LogOut, MessageCircle, Moon, Plus, Send, ShieldCheck, Sparkles, Sun, Trash2, UserRound, UsersRound } from 'lucide-react';
 
 export const API = import.meta.env.VITE_API_URL || 'http://localhost:4000';
-export const accounts = [['세입자 1', 'tenant1'], ['세입자 2', 'tenant2'], ['운영사', 'operatorA']];
 export const survey = [
   ['lateReturnBand', '자정 이후 귀가 빈도', ['0회', '1~2회', '3~5회', '6회 이상']],
   ['sleepTimeBand', '보통 잠드는 시간', ['22시 이전', '22~24시', '00~02시', '02시 이후']],

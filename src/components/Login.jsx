@@ -1,4 +1,4 @@
-import { React, useState, ArrowRight, API, accounts } from '../shared.js';
+import { React, useState, ArrowRight, API } from '../shared.js';
 import ProfileSetup from './ProfileSetup.jsx';
 
 export default function Login({ onLogin, variantContext, onChangeVariant, presentationMode = false }) {
@@ -7,9 +7,55 @@ export default function Login({ onLogin, variantContext, onChangeVariant, presen
   const [password, setPassword] = useState('');
   const [authResult, setAuthResult] = useState(null);
   const [error, setError] = useState('');
-  const submit = async (event) => { event.preventDefault(); setError(''); try { const body = mode === 'register' ? { accountId: id, password, pseudonym: '새 입주자', age: 18, gender: 'prefer_not_to_say' } : { accountId: id, password }; const response = await fetch(API + `/api/v1/auth/${mode === 'register' ? 'register' : 'login'}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); const data = await response.json(); if (!response.ok) throw Error(data.error); if (mode === 'register') setAuthResult(data); else onLogin(data); } catch (error) { setError(error.message === 'ACCOUNT_ID_TAKEN' ? '이미 사용 중인 아이디예요.' : mode === 'register' ? '아이디는 영문·숫자·밑줄 4자 이상으로 입력해 주세요.' : '로그인에 실패했어요. 아이디와 비밀번호를 확인해 주세요.'); } };
+
+  const submit = async (event) => {
+    event.preventDefault();
+    setError('');
+    try {
+      const body = mode === 'register'
+        ? { accountId: id, password, pseudonym: '새 입주자', age: 18, gender: 'prefer_not_to_say' }
+        : { accountId: id, password };
+      const response = await fetch(`${API}/api/v1/auth/${mode === 'register' ? 'register' : 'login'}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await response.json();
+      if (!response.ok) throw Error(data.error);
+      if (mode === 'register') setAuthResult(data);
+      else onLogin(data);
+    } catch (requestError) {
+      if (requestError.message === 'ACCOUNT_ID_TAKEN') setError('이미 사용 중인 아이디예요.');
+      else if (mode === 'register' && requestError.message === 'INVALID_SIGNUP_INPUT') setError('아이디는 영문·숫자·밑줄 4자 이상으로 입력해 주세요.');
+      else if (mode === 'register') setError('회원가입 서버에 연결하지 못했어요. 잠시 후 다시 시도해 주세요.');
+      else setError('로그인에 실패했어요. 아이디와 비밀번호를 확인해 주세요.');
+    }
+  };
+
   if (authResult) return <ProfileSetup authResult={authResult} onComplete={onLogin} />;
-  const variantLabel = variantContext.id === 'standard' ? '현재 버전' : variantContext.id === 'dorm' ? '대학교 기숙사' : '거리 기반 1km';
+
+  const variantLabel = variantContext.id === 'standard'
+    ? '현재 버전'
+    : variantContext.id === 'dorm'
+      ? '대학교 기숙사'
+      : '거리 기반 1km';
   const registerMode = mode === 'register';
-  return <div className="app-shell login-shell"><section className="login-page"><div className="login-brand"><img className="app-logo login-logo" src="/checkmate-logo.svg" alt="CheckMate 로고" /><strong>CheckMate</strong></div>{!presentationMode && <button type="button" className="login-variant-pill" onClick={onChangeVariant}>선택 버전: {variantLabel} 변경</button>}<div className="login-copy"><div className="eyebrow"><span className="live-dot" />안심 매칭 서비스</div><h1>안전한 생활과<br />잘 맞는 룸메이트를 찾아요.</h1><p>행동 기반 설문과 투명한 룰베이스로 함께 살기 좋은 룸메이트를 찾아요.</p></div><form className="login-card" onSubmit={submit}><div className="login-card-head"><strong>{registerMode ? '회원가입' : '로그인'}</strong><span>{registerMode ? '1단계' : '테스트 계정'}</span></div><label>아이디<input value={id} onChange={(event) => setId(event.target.value)} autoComplete="username" required /></label><label>비밀번호<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={registerMode ? 'new-password' : 'current-password'} minLength={4} required /></label>{error && <p className="login-error">{error}</p>}<button className="primary-button">{registerMode ? '다음: 프로필 작성' : '로그인하기'} <ArrowRight size={18} /></button></form><button className="auth-mode-toggle" type="button" onClick={() => { setMode(registerMode ? 'login' : 'register'); setError(''); }}>{registerMode ? '이미 계정이 있어요 · 로그인' : '처음 이용하시나요? · 회원가입'}</button>{!registerMode && <div className="quick-accounts"><p>테스트 계정 빠른 입력</p><div>{accounts.slice(0, 2).map(([label, value]) => <button type="button" key={value} onClick={() => { setId(value); setPassword('1234'); }}><span>{label}</span><small>{value} · 비밀번호 1234 자동 입력</small></button>)}</div></div>}</section></div>;
+
+  return (
+    <div className="app-shell login-shell">
+      <section className="login-page">
+        <div className="login-brand"><img className="app-logo login-logo" src="/checkmate-logo.svg" alt="CheckMate 로고" /><strong>CheckMate</strong></div>
+        {!presentationMode && <button type="button" className="login-variant-pill" onClick={onChangeVariant}>선택 버전: {variantLabel} 변경</button>}
+        <div className="login-copy"><div className="eyebrow"><span className="live-dot" />안심 매칭 서비스</div><h1>안전한 생활과<br />잘 맞는 룸메이트를 찾아요.</h1><p>행동 기반 설문과 투명한 룰베이스로 함께 살기 좋은 룸메이트를 찾아요.</p></div>
+        <form className="login-card" onSubmit={submit}>
+          <div className="login-card-head"><strong>{registerMode ? '회원가입' : '로그인'}</strong><span>{registerMode ? '1단계' : '아이디 로그인'}</span></div>
+          <label>아이디<input value={id} onChange={(event) => setId(event.target.value)} autoComplete="username" required /></label>
+          <label>비밀번호<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={registerMode ? 'new-password' : 'current-password'} minLength={4} required /></label>
+          {error && <p className="login-error">{error}</p>}
+          <button className="primary-button">{registerMode ? '다음: 프로필 작성' : '로그인하기'} <ArrowRight size={18} /></button>
+        </form>
+        <button className="auth-mode-toggle" type="button" onClick={() => { setMode(registerMode ? 'login' : 'register'); setError(''); }}>{registerMode ? '이미 계정이 있어요 · 로그인' : '처음 이용하시나요? · 회원가입'}</button>
+      </section>
+    </div>
+  );
 }
